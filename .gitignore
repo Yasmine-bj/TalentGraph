@@ -1,0 +1,22 @@
+# Secrets
+.env
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# ML
+mlruns/
+ml/models/
+*.pt
+
+# Frontend
+node_modules/
+dist/
+
+# Éditeur / système
+.vscode/
+.idea/
+Thumbs.db
