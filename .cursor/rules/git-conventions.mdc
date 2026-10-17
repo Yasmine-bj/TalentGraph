@@ -1,0 +1,19 @@
+---
+description: Git conventions for TalentGraph (commit messages, branches, pull requests)
+alwaysApply: true
+---
+
+Follow the conventions described in CONTRIBUTING.md.
+
+Commit messages:
+- Format: `type(scope): short description`
+- Types: feat, fix, chore, docs, refactor, test, ci
+- Scope: the project module (m0 to m8, or v2), omitted for cross-cutting changes
+- English, imperative present ("add", not "added"), lowercase, no final period, 72 characters maximum
+- One commit = one logical change; never mix unrelated changes in one message
+
+Branches: `feature/<module>-<topic>` created from `develop`; never commit to `main`.
+
+Never stage or commit `.env` or any file containing secrets.
+
+When suggesting a commit message, explain in one sentence why this type and scope were chosen.
