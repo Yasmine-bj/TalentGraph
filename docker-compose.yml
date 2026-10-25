@@ -59,7 +59,46 @@ services:
 
     # Relance automatique en cas de plantage, sauf arrêt manuel.
     restart: unless-stopped
+  
+  # ---------------------------------------------------------------
+  # Elasticsearch : moteur de recherche (base NoSQL orientée documents)
+  # Rôle dans TalentGraph : index des offres pour la recherche hybride
+  # (BM25 + vecteurs), les filtres et les agrégations du mode 2.
+  # PostgreSQL reste la source de vérité ; cet index se reconstruit.
+  # ---------------------------------------------------------------
+  elasticsearch:
+    # Image officielle, hébergée sur le registre d'Elastic (pas Docker Hub).
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.6
+
+    environment:
+      # Un seul nœud : ne pas chercher d'autres machines du cluster.
+      discovery.type: single-node
+      # Sécurité (mot de passe, HTTPS) désactivée EN LOCAL uniquement.
+      xpack.security.enabled: "false"
+      # Mémoire Java (heap) fixée à 1 Go : minimum = maximum.
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+
+    # API REST d'Elasticsearch : http://localhost:9200 depuis ton PC,
+    # http://elasticsearch:9200 depuis les autres conteneurs.
+    ports:
+      - "9200:9200"
+
+    # Dossier où Elasticsearch stocke ses index.
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+
+    # Prêt quand la route _cluster/health répond.
+    # curl -f échoue si la réponse est une erreur HTTP.
+    # Elasticsearch met 20 à 60 s à démarrer, d'où plus de tentatives.
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+
+    restart: unless-stopped
 
 volumes:
   pg_data:
   redis_data:   # journal AOF de Redis
+  es_data:      # index Elasticsearch
