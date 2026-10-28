@@ -20,3 +20,7 @@ dist/
 .vscode/
 .idea/
 Thumbs.db
+
+# Données récupérées des API (locales, non versionnées)
+seed/raw/
+seed/offers_sample.json
