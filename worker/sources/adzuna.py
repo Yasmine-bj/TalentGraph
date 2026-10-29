@@ -16,7 +16,8 @@ RAPPEL SUR L'API ADZUNA :
     - Une recherche = une requête GET sur une URL du type :
         https://api.adzuna.com/v1/api/jobs/fr/search/1?app_id=...&app_key=...&what=data&where=Paris
     - 1 page = 1 appel = 50 offres au maximum. Pour 100 offres : 2 pages, donc 2 appels.
-    - Abonnement : 500 appels par jour, 5 000 par mois.
+    - Abonnement : 50 appels par minute, 500 par jour, 2 000 par semaine,
+      5 000 par mois.
 
 POURQUOI UN CACHE ?
     Chaque appel est compté. Pendant le développement, on relance le script
@@ -33,6 +34,7 @@ from pathlib import Path  # manipuler des chemins de fichiers, quel que soit l'O
 import requests         # bibliothèque de référence pour les requêtes HTTP
 
 from models import JobOffer  # notre format commun (voir models.py)
+from contracts import detect_contract  # déduit le contrat et sa source (voir contracts.py)
 
 
 # ---------------------------------------------------------------------------
@@ -57,6 +59,16 @@ RESULTS_PER_PAGE = 50
 # de l'API et ne pas être bloqué (erreur HTTP 429 "Too Many Requests").
 PAUSE_BETWEEN_CALLS = 3
 
+# Nouvelles tentatives en cas d'erreur PASSAGÈRE (réseau coupé, 429 "trop de
+# requêtes", 5xx "erreur côté Adzuna") : on attend de plus en plus longtemps
+# entre deux essais ("backoff"), pour laisser au problème le temps de passer.
+# 3 attentes = 4 essais au total avant d'abandonner.
+RETRY_WAITS = [5, 15, 30]  # secondes
+
+# Codes HTTP qui valent la peine d'être réessayés. Les autres (400 paramètre
+# invalide, 410 authentification refusée...) échoueraient à nouveau : inutile.
+RETRYABLE_STATUS = {429, 500, 502, 503, 504}
+
 # Dossier du cache : <racine du projet>/seed/raw/adzuna/
 #   Path(__file__)          -> le chemin de CE fichier (worker/sources/adzuna.py)
 #   .resolve()              -> le transforme en chemin absolu
@@ -69,17 +81,94 @@ CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "seed" / "raw" / "ad
 
 
 # ---------------------------------------------------------------------------
+# 0. REQUÊTE HTTP SÉCURISÉE
+# ---------------------------------------------------------------------------
+
+def _safe_get(url: str, params: dict) -> requests.Response:
+    """Envoie une requête GET sans jamais laisser la clé apparaître dans une erreur.
+
+    POURQUOI ?
+        Les clés Adzuna passent dans l'URL (?app_id=...&app_key=...).
+        Si la CONNEXION échoue (pas d'Internet, VPN, DNS...), la bibliothèque
+        requests lève une exception dont le message contient l'URL COMPLÈTE,
+        donc la clé en clair. Elle finirait affichée dans le terminal, dans
+        des logs ou dans un copier-coller.
+
+    COMMENT ?
+        On intercepte toutes les erreurs réseau (requests.RequestException)
+        et on lève à la place une erreur avec un message propre, SANS l'URL.
+        "from None" supprime la chaîne d'exceptions d'origine, qui contient
+        elle aussi l'URL.
+    """
+    try:
+        return requests.get(
+            url,
+            params=params,
+            headers={"Accept": "application/json"},
+            timeout=TIMEOUT,
+        )
+    except requests.RequestException as error:
+        # type(error).__name__ : le nom du type d'erreur (ConnectionError, Timeout...),
+        # utile pour le diagnostic et sans aucune donnée sensible.
+        raise RuntimeError(
+            f"Échec de la connexion à Adzuna ({type(error).__name__}). "
+            "Vérifie ta connexion Internet, ton VPN ou ton DNS "
+            "(test : nslookup api.adzuna.com)."
+        ) from None
+
+
+def _get_with_retry(url: str, params: dict) -> requests.Response:
+    """Comme _safe_get, mais réessaie en cas d'erreur passagère.
+
+    Renvoie la réponse dès qu'elle n'est plus une erreur passagère
+    (succès, ou erreur définitive comme 400 / 410 que fetch_page traitera).
+    Si TOUS les essais échouent, la dernière erreur est remontée.
+
+    Une nouvelle tentative ne coûte rien de plus que l'appel raté :
+    un appel qui échoue avant d'atteindre Adzuna n'est pas décompté,
+    et un 429 indique justement qu'Adzuna nous a refusé.
+    """
+    # enumerate(...) donne (numéro, valeur) : 0, 1, 2... puis None à la fin.
+    # [*RETRY_WAITS, None] : la liste des attentes suivie de None,
+    # qui signifie "plus d'attente possible : c'était le dernier essai".
+    for attempt, wait in enumerate([*RETRY_WAITS, None], start=1):
+        try:
+            response = _safe_get(url, params)
+            if response.status_code not in RETRYABLE_STATUS:
+                return response  # succès ou erreur définitive
+            problem = f"HTTP {response.status_code}"
+        except RuntimeError as error:  # erreur réseau (levée par _safe_get, sans la clé)
+            if wait is None:
+                raise  # dernier essai : on remonte l'erreur
+            problem = str(error)
+        if wait is None:
+            return response  # dernier essai : fetch_page affichera l'erreur HTTP
+        print(f"  Essai {attempt} échoué ({problem}), nouvel essai dans {wait} s...")
+        time.sleep(wait)
+
+
+# ---------------------------------------------------------------------------
 # 1. RÉCUPÉRER UNE PAGE (avec cache)
 # ---------------------------------------------------------------------------
 
-def fetch_page(keywords: str, location: str, page: int, country: str = "fr") -> list[dict]:
+def fetch_page(
+    keywords: str,
+    location: str | None,
+    page: int,
+    country: str = "fr",
+    extra_params: dict | None = None,
+) -> list[dict]:
     """Récupère UNE page de résultats bruts (format Adzuna), depuis le cache si possible.
 
     Paramètres :
         keywords : mots-clés recherchés, ex. "data engineer"
-        location : lieu, ex. "Paris"
+        location : lieu, ex. "Paris" ; None = tout le pays ("where" n'est pas envoyé)
         page     : numéro de page (Adzuna commence à 1)
         country  : code pays dans l'URL ("fr" par défaut)
+        extra_params : filtres Adzuna supplémentaires (facultatif), ex.
+            {"title_only": "alternance"} : le mot doit être dans le TITRE ;
+            {"category": "it-jobs"}      : uniquement la catégorie informatique ;
+            {"max_days_old": 30}         : offres de moins de 30 jours.
 
     Renvoie :
         une liste de dictionnaires, chacun étant une offre au format Adzuna.
@@ -95,7 +184,18 @@ def fetch_page(keywords: str, location: str, page: int, country: str = "fr") -> 
     # Exemple : ("data engineer", "Paris", 2) -> "fr_data-engineer_paris_p2.json"
     # Attention : RESULTS_PER_PAGE ne fait pas partie du nom. Changer cette
     # constante ne déclenche donc PAS de nouveau téléchargement des pages en cache.
-    safe_name = f"{country}_{keywords}_{location}_p{page}".lower().replace(" ", "-")
+    # location vaut None pour une recherche nationale : on écrit alors "france"
+    # dans le nom du fichier. requests n'envoie pas les paramètres qui valent
+    # None : "where" disparaît donc de l'URL, et Adzuna cherche dans tout le pays.
+    safe_name = f"{country}_{keywords}_{location or 'france'}_p{page}"
+    # Les filtres font partie de la recherche : ils doivent donc faire partie
+    # du nom du fichier, sinon deux recherches différentes partageraient le
+    # même cache. sorted() : toujours le même ordre, donc toujours le même nom.
+    # ex. {"title_only": "alternance"} -> "..._p1__title_only-alternance"
+    if extra_params:
+        suffix = "__".join(f"{k}-{v}" for k, v in sorted(extra_params.items()))
+        safe_name += f"__{suffix}"
+    safe_name = safe_name.lower().replace(" ", "-")
     cache_file = CACHE_DIR / f"{safe_name}.json"
 
     # --- Cas 1 : la page est déjà en cache -> on la relit, AUCUN appel consommé ---
@@ -106,37 +206,41 @@ def fetch_page(keywords: str, location: str, page: int, country: str = "fr") -> 
         return json.loads(cache_file.read_text(encoding="utf-8"))
 
     # --- Cas 2 : la page n'est pas en cache -> on appelle l'API ---
-    # requests.get envoie une requête HTTP GET.
+    # _get_with_retry (voir plus haut) envoie une requête HTTP GET, réessaie en
+    # cas d'erreur passagère, et ne laisse jamais la clé apparaître dans un message.
     #   params  : requests les ajoute à l'URL sous la forme ?clé=valeur&...
     #             en encodant correctement espaces et caractères spéciaux.
     #   headers : en-têtes HTTP ; "Accept" indique qu'on veut du JSON.
     #   timeout : délai maximal d'attente (voir TIMEOUT).
     # Les clés sont lues dans os.environ, rempli depuis .env par load_dotenv()
     # (dans fetch_offers.py). Elles ne sont JAMAIS écrites dans le code.
-    response = requests.get(
+    response = _get_with_retry(
         BASE_URL.format(country=country, page=page),
         params={
             "app_id": os.environ["ADZUNA_APP_ID"],    # identifiant de l'application
             "app_key": os.environ["ADZUNA_APP_KEY"],  # clé secrète
             "what": keywords,                         # mots-clés
-            "where": location,                        # lieu
+            "where": location,                        # lieu (None -> non envoyé)
             "results_per_page": RESULTS_PER_PAGE,     # taille de la page
+            # ** "déballe" le dictionnaire : ses paires clé/valeur sont ajoutées
+            # aux paramètres. "or {}" : rien à ajouter si extra_params vaut None.
+            **(extra_params or {}),
         },
-        headers={"Accept": "application/json"},
-        timeout=TIMEOUT,
     )
 
     # Gestion des erreurs HTTP.
     # response.ok vaut True pour les codes 2xx (succès), False sinon.
-    # Codes fréquents : 401 = clé invalide, 400 = paramètre refusé,
-    #                   429 = trop de requêtes, 5xx = problème côté Adzuna.
+    # Codes fréquents : 400 = paramètre refusé, 410 = authentification refusée
+    #                   (clé invalide, d'après la doc Adzuna), 429 = trop de
+    #                   requêtes, 5xx = problème côté Adzuna.
     if not response.ok:
         # On affiche le code et le début de la réponse (qui explique l'erreur),
         # mais JAMAIS l'URL : elle contient la clé secrète en clair.
         print(f"Erreur {response.status_code} : {response.text[:300]}")
-    # raise_for_status() lève une exception si le code est une erreur (4xx, 5xx) :
-    # le programme s'arrête au lieu de continuer avec des données invalides.
-    response.raise_for_status()
+        # On arrête le programme au lieu de continuer avec des données invalides.
+        # On n'utilise PAS response.raise_for_status() : son message d'erreur
+        # contient l'URL complète, donc la clé ("... for url: https://...app_key=...").
+        raise RuntimeError(f"Adzuna a répondu {response.status_code}")
 
     # --- On sauvegarde la réponse brute dans le cache, puis on la renvoie ---
     # response.json() transforme la réponse en dictionnaire Python.
@@ -147,6 +251,10 @@ def fetch_page(keywords: str, location: str, page: int, country: str = "fr") -> 
     #   indent=2           : met en forme le fichier pour qu'il soit lisible
     cache_file.write_text(json.dumps(results, ensure_ascii=False, indent=2), encoding="utf-8")
     print(f"(API) {cache_file.name} : {len(results)} offres, appel consommé")
+    # Pause APRÈS un vrai appel seulement, pour respecter la limite de débit.
+    # Une page relue depuis le cache (cas 1) ne fait pas de pause : une relance
+    # entièrement depuis le cache est donc quasi instantanée.
+    time.sleep(PAUSE_BETWEEN_CALLS)
     return results
 
 
@@ -154,7 +262,7 @@ def fetch_page(keywords: str, location: str, page: int, country: str = "fr") -> 
 # 2. TRADUIRE UNE OFFRE ADZUNA VERS NOTRE FORMAT
 # ---------------------------------------------------------------------------
 
-def to_job_offer(raw: dict) -> JobOffer:
+def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
     """Convertit UNE offre au format Adzuna vers notre format commun JobOffer.
 
     C'est le cœur de l'adaptateur : la seule fonction qui connaît les noms
@@ -173,6 +281,9 @@ def to_job_offer(raw: dict) -> JobOffer:
           "redirect_url": "https://www.adzuna.fr/details/5937384042?..."
         }
 
+    search_keywords : mots-clés de la recherche qui a ramené l'offre ;
+    utilisés comme indice pour le contrat si le texte ne dit rien.
+
     Robustesse : les données d'une API externe sont souvent INCOMPLÈTES.
       - raw.get("cle") renvoie None si la clé est absente, au lieu de planter
         comme raw["cle"] le ferait (KeyError).
@@ -185,18 +296,30 @@ def to_job_offer(raw: dict) -> JobOffer:
         Sans ce "or {}", None.get(...) ferait planter tout le programme
         à cause d'UNE seule offre incomplète.
     """
+    # Contrat déduit (texte, puis champ brut d'Adzuna en dernier recours).
+    # Un tuple se "déballe" en deux variables : types, source = (a, b).
+    contract_types, contract_source = detect_contract(
+        title=raw.get("title", ""),
+        description=raw.get("description", ""),
+        search_keywords=search_keywords,
+        contract_raw=raw.get("contract_type"),
+    )
     return JobOffer(
         source="adzuna",
         source_id=str(raw.get("id")),   # str() : on stocke l'identifiant en texte
         title=raw.get("title", ""),
         company=(raw.get("company") or {}).get("display_name"),
         location=(raw.get("location") or {}).get("display_name"),
-        contract_type=raw.get("contract_type"),
+        # Contrat déduit plus haut ; on garde aussi la valeur brute d'Adzuna.
+        contract_types=contract_types,
+        contract_source=contract_source,        # d'où vient le contrat (niveau de confiance)
+        contract_raw=raw.get("contract_type"),
         category=(raw.get("category") or {}).get("label"),
         description=raw.get("description", ""),
         salary_min=raw.get("salary_min"),
         salary_max=raw.get("salary_max"),
         created_at=raw.get("created"),          # Adzuna l'appelle "created"
+        search_keywords=search_keywords,       # la recherche d'origine
         url=raw.get("redirect_url", ""),        # Adzuna l'appelle "redirect_url"
     )
 
@@ -205,7 +328,12 @@ def to_job_offer(raw: dict) -> JobOffer:
 # 3. FONCTION PUBLIQUE : récupérer plusieurs pages et renvoyer des JobOffer
 # ---------------------------------------------------------------------------
 
-def fetch_offers(keywords: str, location: str, max_pages: int = 1) -> list[JobOffer]:
+def fetch_offers(
+    keywords: str,
+    location: str | None,
+    max_pages: int = 1,
+    extra_params: dict | None = None,
+) -> list[JobOffer]:
     """Récupère jusqu'à max_pages pages et renvoie la liste des JobOffer.
 
     C'est la seule fonction que le reste du projet appelle.
@@ -213,6 +341,7 @@ def fetch_offers(keywords: str, location: str, max_pages: int = 1) -> list[JobOf
 
     Nombre d'offres  = 50 x nombre de pages (au maximum)
     Nombre d'appels  = nombre de pages qui ne sont pas déjà en cache
+    Arrêt anticipé   : dès qu'une page est vide ou incomplète (< 50 offres)
     """
     # Annotation : offers est une liste de JobOffer, vide au départ.
     offers: list[JobOffer] = []
@@ -220,7 +349,7 @@ def fetch_offers(keywords: str, location: str, max_pages: int = 1) -> list[JobOf
     # range(1, max_pages + 1) produit 1, 2, ..., max_pages
     # (le +1 car range s'arrête AVANT la borne de fin ; Adzuna commence à la page 1).
     for page in range(1, max_pages + 1):
-        raw_results = fetch_page(keywords, location, page)
+        raw_results = fetch_page(keywords, location, page, extra_params=extra_params)
         print(f"Page {page} : {len(raw_results)} offres")
 
         # Une page vide signifie qu'il n'y a plus de résultats : inutile
@@ -232,11 +361,53 @@ def fetch_offers(keywords: str, location: str, max_pages: int = 1) -> list[JobOf
         #   to_job_offer(r) for r in raw_results  -> un GÉNÉRATEUR : applique
         #   to_job_offer à chaque offre, une par une.
         #   .extend(...) ajoute tous ces éléments à la fin de la liste.
-        offers.extend(to_job_offer(r) for r in raw_results)
+        offers.extend(to_job_offer(r, search_keywords=keywords) for r in raw_results)
 
-        # Pause avant la page suivante, pour respecter la limite de débit.
-        # (Remarque : la pause a lieu même si la page venait du cache ;
-        #  on pourra l'optimiser plus tard.)
-        time.sleep(PAUSE_BETWEEN_CALLS)
+        # Une page INCOMPLÈTE (moins de RESULTS_PER_PAGE offres) est forcément
+        # la dernière : Adzuna remplit chaque page au maximum avant de passer
+        # à la suivante. Demander la page suivante consommerait un appel pour
+        # recevoir une page vide. On s'arrête donc ici.
+        # Ex. une recherche avec 130 offres : pages 1 et 2 pleines (50),
+        #     page 3 = 30 offres -> pas de page 4.
+        if len(raw_results) < RESULTS_PER_PAGE:
+            break
+
+        # (La pause entre deux appels est faite dans fetch_page, uniquement
+        #  après un vrai appel API : rien à faire ici.)
 
     return offers
+
+
+# ---------------------------------------------------------------------------
+# 4. LISTE DES CATÉGORIES ADZUNA (avec cache)
+# ---------------------------------------------------------------------------
+
+def fetch_categories(country: str = "fr") -> list[dict]:
+    """Renvoie les catégories d'offres d'Adzuna pour un pays.
+
+    Chaque catégorie a un "tag" (code à passer au filtre category=...)
+    et un "label" lisible, ex. {"tag": "it-jobs", "label": "Emplois Informatique"}.
+    Mise en cache comme les recherches : 1 seul appel, la première fois.
+    """
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    cache_file = CACHE_DIR / f"categories_{country}.json"
+    if cache_file.exists():
+        print(f"(cache) {cache_file.name}")
+        return json.loads(cache_file.read_text(encoding="utf-8"))
+
+    response = _get_with_retry(
+        f"https://api.adzuna.com/v1/api/jobs/{country}/categories",
+        params={
+            "app_id": os.environ["ADZUNA_APP_ID"],
+            "app_key": os.environ["ADZUNA_APP_KEY"],
+        },
+    )
+    if not response.ok:
+        print(f"Erreur {response.status_code} : {response.text[:300]}")
+        # Pas de raise_for_status() : son message contiendrait la clé (voir fetch_page).
+        raise RuntimeError(f"Adzuna a répondu {response.status_code}")
+
+    categories = response.json().get("results", [])
+    cache_file.write_text(json.dumps(categories, ensure_ascii=False, indent=2), encoding="utf-8")
+    print(f"(API) {cache_file.name} : {len(categories)} catégories, appel consommé")
+    return categories
