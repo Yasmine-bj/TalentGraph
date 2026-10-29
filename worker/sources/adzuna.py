@@ -262,6 +262,39 @@ def fetch_page(
 # 2. TRADUIRE UNE OFFRE ADZUNA VERS NOTRE FORMAT
 # ---------------------------------------------------------------------------
 
+def _split_area(area: list[str]) -> tuple[str | None, str | None, str | None]:
+    """Découpe la localisation Adzuna en (région, département, ville).
+
+    Adzuna décrit le lieu par une liste du plus large au plus précis :
+        ["France", "Bretagne", "Finistère", "Brest"]
+        indice 0 = pays, 1 = région, 2 = département, puis ville / commune.
+
+    Exemples (vérifiés sur nos 7 298 offres) :
+        ["France", "Bretagne", "Finistère", "Brest"]        -> ("Bretagne", "Finistère", "Brest")
+        ["France", "Ile-de-France", "Paris"]                -> ("Ile-de-France", "Paris", "Paris")
+        ["France", "Occitanie", "Haute-Garonne"]            -> ("Occitanie", "Haute-Garonne", None)
+        ["France", "Provence-Alpes-Côte d'Azur", "Var",
+         "Draguignan", "Le Luc"]                            -> ("Provence-Alpes-Côte d'Azur", "Var", "Le Luc")
+        ["France", "Ile-de-France"]                         -> ("Ile-de-France", None, None)
+        ["France"]                                          -> (None, None, None)   # offre nationale
+
+    La ville est le DERNIER élément (le plus précis), à partir de 4 éléments.
+    Avec 3 éléments, l'offre n'est localisée qu'au DÉPARTEMENT (ex. 206 offres
+    "Haute-Garonne" sans ville) : pas de ville, SAUF Paris (708 offres), qui
+    est à la fois un département et une ville.
+    """
+    # Une condition sur la longueur évite une IndexError si la liste est courte.
+    region = area[1] if len(area) >= 2 else None
+    department = area[2] if len(area) >= 3 else None
+    if len(area) >= 4:
+        city = area[-1]          # area[-1] = dernier élément (le plus précis)
+    elif department == "Paris":
+        city = "Paris"           # Paris : département ET ville
+    else:
+        city = None              # localisée au département seulement
+    return region, department, city
+
+
 def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
     """Convertit UNE offre au format Adzuna vers notre format commun JobOffer.
 
@@ -296,6 +329,11 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         Sans ce "or {}", None.get(...) ferait planter tout le programme
         à cause d'UNE seule offre incomplète.
     """
+    # Localisation découpée (voir _split_area). "or {}" / "or []" : au cas où
+    # le sous-objet ou la liste manquerait.
+    location = raw.get("location") or {}
+    region, department, city = _split_area(location.get("area") or [])
+
     # Contrat déduit (texte, puis champ brut d'Adzuna en dernier recours).
     # Un tuple se "déballe" en deux variables : types, source = (a, b).
     contract_types, contract_source = detect_contract(
@@ -309,11 +347,17 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         source_id=str(raw.get("id")),   # str() : on stocke l'identifiant en texte
         title=raw.get("title", ""),
         company=(raw.get("company") or {}).get("display_name"),
-        location=(raw.get("location") or {}).get("display_name"),
+        location=location.get("display_name"),
+        region=region,
+        department=department,
+        city=city,
+        latitude=raw.get("latitude"),
+        longitude=raw.get("longitude"),
         # Contrat déduit plus haut ; on garde aussi la valeur brute d'Adzuna.
         contract_types=contract_types,
         contract_source=contract_source,        # d'où vient le contrat (niveau de confiance)
         contract_raw=raw.get("contract_type"),
+        contract_time=raw.get("contract_time"),  # "full_time", "part_time" ou None
         category=(raw.get("category") or {}).get("label"),
         description=raw.get("description", ""),
         salary_min=raw.get("salary_min"),
@@ -321,6 +365,7 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         created_at=raw.get("created"),          # Adzuna l'appelle "created"
         search_keywords=search_keywords,       # la recherche d'origine
         url=raw.get("redirect_url", ""),        # Adzuna l'appelle "redirect_url"
+        raw=raw,                                # l'offre brute complète (-> JSONB)
     )
 
 
@@ -346,6 +391,17 @@ def fetch_offers(
     # Annotation : offers est une liste de JobOffer, vide au départ.
     offers: list[JobOffer] = []
 
+    # Étiquette de la recherche, stockée dans chaque offre (search_keywords).
+    # Pour une recherche ciblée, on ajoute le contrat visé entre crochets :
+    #   "data" + {"title_only": "alternance"} -> "data [alternance]"
+    # Sinon, on ne saurait pas que l'offre vient d'une recherche d'alternances.
+    title_only = (extra_params or {}).get("title_only")
+    # (Pas de crochets si title_only répète les mots-clés : "cloud", pas "cloud [cloud]".)
+    if title_only and title_only != keywords:
+        search_label = f"{keywords} [{title_only}]"
+    else:
+        search_label = keywords
+
     # range(1, max_pages + 1) produit 1, 2, ..., max_pages
     # (le +1 car range s'arrête AVANT la borne de fin ; Adzuna commence à la page 1).
     for page in range(1, max_pages + 1):
@@ -361,7 +417,7 @@ def fetch_offers(
         #   to_job_offer(r) for r in raw_results  -> un GÉNÉRATEUR : applique
         #   to_job_offer à chaque offre, une par une.
         #   .extend(...) ajoute tous ces éléments à la fin de la liste.
-        offers.extend(to_job_offer(r, search_keywords=keywords) for r in raw_results)
+        offers.extend(to_job_offer(r, search_keywords=search_label) for r in raw_results)
 
         # Une page INCOMPLÈTE (moins de RESULTS_PER_PAGE offres) est forcément
         # la dernière : Adzuna remplit chaque page au maximum avant de passer

@@ -48,7 +48,14 @@ class JobOffer:
     # --- Contenu principal ---
     title: str               # intitulé du poste, ex. "Data Engineer"
     company: str | None      # nom de l'entreprise (parfois absent)
-    location: str | None     # lieu, ex. "Paris, Ile-de-France"
+    location: str | None     # lieu tel qu'affiché par la source, ex. "Brest, Finistère"
+    # Lieu NORMALISÉ (découpé), pour les filtres du formulaire.
+    # Vide (None) quand la source ne donne que le pays (offre nationale / télétravail).
+    region: str | None       # ex. "Bretagne"
+    department: str | None   # ex. "Finistère"
+    city: str | None         # ex. "Brest" (le niveau le plus précis disponible)
+    latitude: float | None   # coordonnées GPS (carte des offres, bonus)
+    longitude: float | None
     # Types de contrat NORMALISÉS, déduits par contracts.detect_contract()
     # (texte de l'offre, puis champ brut de la source en dernier recours).
     # Une LISTE, car une offre peut en proposer plusieurs ("Stage / Alternance").
@@ -66,6 +73,8 @@ class JobOffer:
     # chez Adzuna). Souvent vide ; "permanent" est fiable (~96 %) et sert de
     # dernier recours, "contract" est inutilisable (mélange stage/freelance/CDD).
     contract_raw: str | None
+    # Temps de travail fourni par la source : "full_time", "part_time" ou None.
+    contract_time: str | None
     category: str | None     # catégorie fournie par la source ; servira de "métier"
                              # (chez Adzuna elle est parfois trop vague, ex. "Autres/Général")
     description: str         # description du poste (chez Adzuna : un EXTRAIT tronqué)
@@ -75,10 +84,17 @@ class JobOffer:
     salary_max: float | None # salaire maximum annuel
     created_at: str | None   # date de publication, au format ISO 8601
                              # ex. "2026-10-22T06:01:47Z" (Z = heure UTC)
-    # Mots-clés de la recherche qui a ramené l'offre (ex. "stage data").
-    # Sert d'indice pour le contrat quand le texte ne dit rien.
+    # Recherche qui a ramené l'offre : ses mots-clés, suivis du contrat ciblé
+    # entre crochets pour les recherches title_only.
+    #   ex. "data engineer" (recherche générale), "data [alternance]" (ciblée).
+    # Sert d'indice pour le contrat (dernier recours) et de famille de métier
+    # pour les statistiques.
     search_keywords: str | None
     url: str                 # lien vers l'annonce complète sur le site d'origine
+    # L'offre BRUTE, telle que renvoyée par la source (dictionnaire complet).
+    # Stockée dans PostgreSQL (colonne JSONB "raw") : on peut ainsi retraiter
+    # les offres sans le fichier cache ni aucun appel API.
+    raw: dict
 
     def to_dict(self) -> dict:
         """Convertit l'offre en dictionnaire Python.
