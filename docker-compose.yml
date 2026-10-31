@@ -12,7 +12,14 @@ services:
     ports:
       - "5432:5432"
     volumes:
-      - pg_data:/var/lib/postgresql/data
+      - pg_data:/var/lib/postgresql/data # volume pour les données de la base de données
+      # Scripts SQL d'initialisation (création des tables).
+      # Le dossier du projet est "monté" dans le dossier spécial
+      # /docker-entrypoint-initdb.d/ : au PREMIER démarrage (volume pg_data
+      # vide), PostgreSQL exécute les .sql qu'il contient, par ordre alphabétique.
+      # :ro (read-only) : le conteneur peut lire ces fichiers, pas les modifier.
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+      # Scripts SQL d'initialisation (création des tables).
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
