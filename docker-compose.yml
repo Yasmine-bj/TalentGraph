@@ -10,7 +10,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
       POSTGRES_DB: ${POSTGRES_DB}
     ports:
-      - "5432:5432"
+       # port_du_PC:port_du_conteneur
+      # 5433 côté PC : le port 5432 est déjà pris par un PostgreSQL installé
+      # sur Windows. Dans le conteneur et dans le réseau Docker, ça reste 5432.
+      - "5433:5432"
     volumes:
       - pg_data:/var/lib/postgresql/data # volume pour les données de la base de données
       # Scripts SQL d'initialisation (création des tables).
