@@ -29,6 +29,7 @@ POURQUOI UN CACHE ?
 import json             # lire / écrire du JSON (format des réponses et du cache)
 import os               # os.environ : les variables d'environnement (nos clés)
 import time             # time.sleep : faire une pause entre deux appels
+import unicodedata      # retirer les accents (comparaison des noms de régions)
 from pathlib import Path  # manipuler des chemins de fichiers, quel que soit l'OS
 
 import requests         # bibliothèque de référence pour les requêtes HTTP
@@ -262,8 +263,71 @@ def fetch_page(
 # 2. TRADUIRE UNE OFFRE ADZUNA VERS NOTRE FORMAT
 # ---------------------------------------------------------------------------
 
+# Noms de régions : Adzuna n'écrit pas toujours la même région de la même façon.
+# Variantes mesurées sur nos 7 298 offres :
+#   "Ile-de-France" (sans accent), "Hauts-De-France", "Grand-Est",
+#   "Pays de la Loire" / "Pays-de-la-Loire" / "Paysde-la-Loire",
+#   "Centre" / "Centre-Val-de-Loire" / "Centre-Val-De-Loire"...
+# Le filtre région du formulaire exige UNE seule écriture par région.
+# Méthode : on compare une "clé" simplifiée (sans accents, sans majuscules,
+# sans tirets ni espaces) à celle des noms officiels :
+#   "Paysde-la-Loire" -> "paysdelaloire" <- "Pays de la Loire" (nom officiel)
+# Ainsi, toute variante de ce type est reconnue, même une nouvelle.
+
+# Les 18 régions françaises (13 de métropole + 5 d'outre-mer), noms officiels.
+OFFICIAL_REGIONS = [
+    "Auvergne-Rhône-Alpes", "Bourgogne-Franche-Comté", "Bretagne",
+    "Centre-Val de Loire", "Corse", "Grand Est", "Hauts-de-France",
+    "Île-de-France", "Normandie", "Nouvelle-Aquitaine", "Occitanie",
+    "Pays de la Loire", "Provence-Alpes-Côte d'Azur",
+    "Guadeloupe", "Martinique", "Guyane", "La Réunion", "Mayotte",
+]
+
+# Noms qui ne se ramènent pas à un nom officiel par simple simplification.
+REGION_ALIASES = {
+    "Centre": "Centre-Val de Loire",  # ancien nom de la région (119 offres)
+    "DOM-TOM": "Outre-mer",           # outre-mer sans territoire précisé (voir plus bas)
+}
+
+
+def _region_key(name: str) -> str:
+    """Clé simplifiée d'un nom : sans accents, en minuscules, lettres seulement.
+
+    "Île-de-France" -> "iledefrance" ; "Paysde-la-Loire" -> "paysdelaloire".
+    unicodedata.normalize("NFKD", ...) sépare chaque lettre de son accent
+    ("é" -> "e" + accent) ; on ne garde ensuite que les lettres et chiffres
+    (c.isalnum()), ce qui supprime accents, tirets, espaces et apostrophes.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in decomposed if c.isalnum() and c.isascii()).lower()
+
+
+# Dictionnaire clé -> nom officiel, construit une seule fois au chargement du module.
+#   {**a, **b} fusionne deux dictionnaires.
+_REGION_BY_KEY = {
+    **{_region_key(name): name for name in OFFICIAL_REGIONS},
+    **{_region_key(alias): name for alias, name in REGION_ALIASES.items()},
+}
+
+
+def normalize_region(region: str) -> str:
+    """Nom officiel de la région ; inchangé si elle n'est pas reconnue.
+
+    ex. "Paysde-la-Loire" -> "Pays de la Loire" ; "Centre" -> "Centre-Val de Loire" ;
+        "Nouvelle-Calédonie" -> "Nouvelle-Calédonie" (pas une région : gardée telle quelle).
+    """
+    return _REGION_BY_KEY.get(_region_key(region), region)
+
+
+# Outre-mer : Adzuna insère un niveau "DOM-TOM" (ancien terme) entre le pays
+# et la vraie région : ["France", "DOM-TOM", "La Réunion", "Saint-Denis"].
+# Mesuré sur nos offres : La Réunion 21, Martinique 4, Guadeloupe 3,
+# Nouvelle-Calédonie 2, Guyane 1, Mayotte 1.
+OVERSEAS_LABEL = "DOM-TOM"
+
+
 def _split_area(area: list[str]) -> tuple[str | None, str | None, str | None]:
-    """Découpe la localisation Adzuna en (région, département, ville).
+    """Découpe la localisation Adzuna en (région, département, ville), noms harmonisés.
 
     Adzuna décrit le lieu par une liste du plus large au plus précis :
         ["France", "Bretagne", "Finistère", "Brest"]
@@ -271,25 +335,48 @@ def _split_area(area: list[str]) -> tuple[str | None, str | None, str | None]:
 
     Exemples (vérifiés sur nos 7 298 offres) :
         ["France", "Bretagne", "Finistère", "Brest"]        -> ("Bretagne", "Finistère", "Brest")
-        ["France", "Ile-de-France", "Paris"]                -> ("Ile-de-France", "Paris", "Paris")
+        ["France", "Ile-de-France", "Paris"]                -> ("Île-de-France", "Paris", "Paris")
+        ["France", "Ile-de-France", "Paris",
+         "1er Arrondissement"]                              -> ("Île-de-France", "Paris", "Paris")
         ["France", "Occitanie", "Haute-Garonne"]            -> ("Occitanie", "Haute-Garonne", None)
         ["France", "Provence-Alpes-Côte d'Azur", "Var",
          "Draguignan", "Le Luc"]                            -> ("Provence-Alpes-Côte d'Azur", "Var", "Le Luc")
-        ["France", "Ile-de-France"]                         -> ("Ile-de-France", None, None)
+        ["France", "Centre", "Loiret", "Orléans"]           -> ("Centre-Val de Loire", "Loiret", "Orléans")
+        ["France", "DOM-TOM", "La Réunion", "Saint-Denis"]  -> ("La Réunion", "La Réunion", "Saint-Denis")
+        ["France", "DOM-TOM", "Martinique"]                 -> ("Martinique", "Martinique", None)
+        ["France", "Ile-de-France"]                         -> ("Île-de-France", None, None)
         ["France"]                                          -> (None, None, None)   # offre nationale
 
-    La ville est le DERNIER élément (le plus précis), à partir de 4 éléments.
-    Avec 3 éléments, l'offre n'est localisée qu'au DÉPARTEMENT (ex. 206 offres
-    "Haute-Garonne" sans ville) : pas de ville, SAUF Paris (708 offres), qui
-    est à la fois un département et une ville.
+    Règles :
+      1. Outre-mer : on retire le niveau "DOM-TOM" ; le territoire ("La Réunion")
+         devient la région ET le département (comme Paris, ville ET département).
+      2. Région harmonisée (normalize_region : variantes -> nom officiel).
+      3. Ville = DERNIER élément (le plus précis), à partir de 4 éléments.
+         Avec 3 éléments, l'offre n'est localisée qu'au DÉPARTEMENT (ex. 206 offres
+         "Haute-Garonne" sans ville) : pas de ville.
+         Exception : Paris, à la fois département et ville. Ville = "Paris", y
+         compris pour les arrondissements (sinon ville = "1er Arrondissement").
     """
+    # 1. Outre-mer : ["France", "DOM-TOM", "La Réunion", "Saint-Denis"]
+    #             -> ["France", "La Réunion", "La Réunion", "Saint-Denis"]
+    #    [*area[2:]] : tous les éléments à partir de l'indice 2 ("déballés").
+    if len(area) >= 3 and area[1] == OVERSEAS_LABEL:
+        area = [area[0], area[2], *area[2:]]
+
     # Une condition sur la longueur évite une IndexError si la liste est courte.
     region = area[1] if len(area) >= 2 else None
+    # 2. Nom officiel de la région (voir normalize_region).
+    if region is not None:
+        region = normalize_region(region)
+
     department = area[2] if len(area) >= 3 else None
-    if len(area) >= 4:
+
+    # 3. Ville.
+    if department == "Paris":
+        city = "Paris"           # Paris : département ET ville ; les arrondissements
+                                 # ("1er Arrondissement"...) sont ramenés à "Paris"
+    elif len(area) >= 4:
         city = area[-1]          # area[-1] = dernier élément (le plus précis)
-    elif department == "Paris":
-        city = "Paris"           # Paris : département ET ville
     else:
         city = None              # localisée au département seulement
     return region, department, city
