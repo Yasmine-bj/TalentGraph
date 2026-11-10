@@ -109,3 +109,68 @@ Chaque décision technique importante : ce qui a été choisi, pourquoi, et les 
 - Décision : chaque matin, relancer les recherches avec `max_days_old=1` et `sort_by=date`, puis charger en UPSERT (aucun doublon).
 - Expiration : Adzuna n'indique jamais qu'une offre est pourvue. Règle : plus de 45 jours → `status='expired'` dans PostgreSQL (gardée pour les statistiques) et retirée d'Elasticsearch ; suppression définitive après 6 mois.
 - Prérequis : cache daté (`seed/raw/adzuna/<date>/`), sinon la recherche du jour relirait celle de la veille ; journal `ingestion_runs` dans PostgreSQL ; verrou Redis contre les exécutions simultanées.
+
+
+## D13 — Schéma PostgreSQL de la table `offers` (M2)
+- Fichier : `infra/postgres/init/01_schema.sql`, exécuté automatiquement par l'image `postgres` au premier démarrage (volume vide), grâce au montage du dossier dans `/docker-entrypoint-initdb.d/`.
+- Identifiants :
+  - `id` (`BIGINT GENERATED ALWAYS AS IDENTITY`) : identifiant **interne**, pour les liens entre tables ;
+  - `(source, source_id)` **UNIQUE** : identifiant chez la source, stable d'une collecte à l'autre. C'est la clé de l'**UPSERT** (reconnaître une offre déjà connue) ; `source` évite les collisions entre sources.
+- Contraintes (la base protège elle-même la qualité des données, même si le code a un bug) :
+  - `CHECK` sur `contract_types` (au moins une valeur, uniquement `cdi`, `cdd`, `stage`, `alternance`, `freelance`, `inconnu`), `contract_source`, `status` ;
+  - `CHECK` sur les salaires (positifs, min ≤ max ; absents autorisés) ;
+  - `NOT NULL` sur les champs indispensables (titre, description, URL, contrat, `raw`).
+- `contract_types` en **tableau** (`TEXT[]`) plutôt qu'en table de liaison : 1 ou 2 valeurs par offre, liste fermée, aucune information propre au lien. Les **compétences** (M3) auront au contraire une table `offer_skills` : beaucoup de valeurs, liste ouverte, information sur le lien (obligatoire / souhaitée).
+- `raw` en **JSONB** : l'offre brute d'Adzuna est conservée dans la base (retraitement possible sans le cache) ; illustre aussi pourquoi MongoDB serait redondant (D1).
+- Index, choisis selon les requêtes réelles (un index ralentit les écritures et prend de la place) :
+  - B-tree : `region` (filtre du formulaire), `status` (offres actives), `published_at` (expiration), `ingestion_runs.started_at` ;
+  - **GIN** (index inversé) : `contract_types`, pour « le tableau contient `alternance` » (`@>`) ;
+  - uniques automatiques : clés primaires et `(source, source_id)`.
+  Pas d'index sur le texte : la recherche textuelle est le rôle d'Elasticsearch.
+- Cycle de vie : suppression **logique** (`status = 'expired'`) plutôt que `DELETE`, pour garder l'historique des statistiques (D12). Dates `first_seen_at` / `last_seen_at`.
+- Table `ingestion_runs` : journal des chargements (début, fin, statut `running` / `success` / `failed`, compteurs, message d'erreur, paramètres).
+- Testé sur PostgreSQL 16 : doublon, contrat hors liste, tableau vide et salaire incohérent sont refusés ; l'UPSERT met à jour sans créer de ligne.
+
+## D14 — Chargement des offres dans PostgreSQL (`worker/load_offers.py`)
+- Collecte et chargement **séparés** : `fetch_offers.py` (Adzuna → JSON, avec la clé) et `load_offers.py` (JSON → base, sans clé). Le correcteur, le serveur et le futur conteneur `loader` n'ont besoin que du second.
+- **UPSERT** (`INSERT ... ON CONFLICT (source, source_id) DO UPDATE`) : le chargement est **idempotent**. 1er lancement : 7 298 insérées ; 2e : 0 insérée, 7 298 mises à jour. On ne touche ni à `id`, ni à `first_seen_at`, ni à `status` ; `last_seen_at = now()`.
+- **Transaction** « tout ou rien » pour les offres : une seule offre invalide annule tout (ROLLBACK), la base n'est jamais à moitié remplie.
+- **Journal hors transaction** (`autocommit=True`) : la ligne `ingestion_runs` est créée avant le chargement et complétée après (`success` + compteurs, ou `failed` + message), même en cas d'échec.
+- Compteurs insérées / mises à jour : comptage des lignes **avant et après** dans la même transaction (fiable car un seul chargement tourne à la fois).
+- Robustesse : `BaseException` attrapée (un `Ctrl+C` marque le journal `failed` au lieu de le laisser `running`) ; la mise à jour du journal a son propre `try`, pour que l'erreur d'origine soit toujours celle affichée (connexion coupée). Limite connue : si la connexion est perdue, le journal reste `running` (il faudrait une nouvelle connexion).
+- **Requêtes paramétrées** (`%(nom)s`) uniquement : jamais de valeurs collées dans le texte SQL (apostrophes, injection SQL).
+- Connexion paramétrée par l'environnement (`POSTGRES_HOST`, `POSTGRES_PORT`…) : le même code fonctionne sur le PC (`localhost`) et dans un conteneur (`postgres`).
+- Testé : chargement, relance (idempotence), fichier invalide (rollback + journal `failed`), `Ctrl+C` et connexion coupée pendant un chargement de 23 520 offres.
+
+## D15 — Nettoyage de la localisation dans l'adaptateur Adzuna
+- Principe : **chaque adaptateur nettoie les bizarreries de SA source** (`worker/sources/adzuna.py`) et produit un `JobOffer` propre. Le chargement (`load_offers.py`) ne fait qu'enregistrer (responsabilité unique).
+- Localisation découpée à partir de `location.area` (liste du plus large au plus précis : pays, région, département, ville), plutôt que du libellé `display_name` au format variable.
+- **Régions harmonisées** par une **clé simplifiée** (sans accents, minuscules, lettres seulement) comparée aux 18 noms officiels : reconnaît toute variante de ce type, même nouvelle. Variantes trouvées dans nos données : « Ile-de-France », « Hauts-De-France », « Grand-Est », « Pays-de-la-Loire », « Paysde-la-Loire », « Centre-Val-De-Loire ». Alias manuels : « Centre » (ancien nom) et « DOM-TOM » sans territoire.
+- **Outre-mer** : Adzuna insère un niveau « DOM-TOM » ; le territoire (« La Réunion »…) devient la région et le département.
+- **Paris** : département et ville ; les arrondissements sont ramenés à « Paris ».
+- Ville = dernier élément à partir de 4 niveaux ; une offre localisée au département seulement n'a pas de ville.
+- Résultat sur 7 298 offres : 13 régions de métropole + 5 d'outre-mer + Nouvelle-Calédonie, chacune écrite d'une seule façon ; 602 offres sans région (nationales / télétravail), gardées et classées après les offres localisées (boost, pas filtre).
+
+## D16 — PostgreSQL publié sur le port 5433 du PC
+- Problème : `load_offers.py` recevait « authentification par mot de passe échouée » (message en français, alors que l'image Docker répond en anglais).
+- Diagnostic : `netstat -ano | findstr :5432` montrait deux programmes à l'écoute ; `Get-Process` les a identifiés : un **PostgreSQL installé sur Windows** et Docker. Les connexions vers `localhost:5432` arrivaient au PostgreSQL de Windows.
+- Décision : publier le PostgreSQL Docker sur le port **5433** du PC (`"5433:5432"`) et définir `POSTGRES_PORT=5433` dans `.env`. Le PostgreSQL de Windows, utilisé par un autre programme, n'est pas touché.
+- Sans effet entre conteneurs : dans le réseau Docker, PostgreSQL reste joignable sur `postgres:5432`.
+
+## D17 — Mapping et indexation Elasticsearch (`infra/elasticsearch/`, `worker/index_offers.py`)
+- Mapping écrit à la main (`offers_mapping.json`, expliqué champ par champ dans `infra/elasticsearch/README.md`) plutôt que deviné : le mapping dynamique créait des copies `text` + `keyword` de chaque champ et utilisait l'analyseur standard (« développeuse » ne trouvait pas « développeur »).
+- Types selon l'usage :
+  - `text` + analyseur `french` : `title`, `description` (recherche par pertinence, poids différents au M4) ;
+  - `keyword` : région, département, ville, contrats, source… (filtres, comptages) ;
+  - `company` : `text` + sous-champ `keyword` (chercher ET compter) ;
+  - `float`, `date`, `geo_point` (latitude + longitude réunies) ;
+  - `url` et `location_label` : `index: false`, `doc_values: false` (affichage seul, depuis `_source`).
+- `dynamic: strict` : un champ non déclaré fait refuser le document (équivalent des contraintes PostgreSQL).
+- `number_of_shards: 1`, `number_of_replicas: 0` : un seul serveur ; sans réplique, l'état est vert.
+- Non indexés : `raw`, `contract_raw`, `first_seen_at`, `last_seen_at`, `status` (seules les offres actives sont indexées).
+- Indexation : `index_offers.py` lit les offres **actives dans PostgreSQL** (source de vérité, jamais le fichier JSON), **supprime puis recrée** l'index, et envoie les documents par paquets de 500 (API `_bulk`).
+  - `_id` du document = `id` PostgreSQL : les deux bases sont reliées, réindexer remplace le document ;
+  - reconstruction complète : l'index reflète exactement PostgreSQL et suit les évolutions du mapping ; inconvénient accepté : quelques secondes d'index incomplet (des alias l'éviteraient en production) ;
+  - `refresh` puis `_count` pour vérifier : 7 298 / 7 298 documents.
+- Connexion par `ES_URL` (par défaut `http://localhost:9200` ; `http://elasticsearch:9200` dans un conteneur).
+- Prévu : ajout du champ vecteur `dense_vector` pour la recherche par le sens (ajouter un champ est permis ; changer un type impose de réindexer).
