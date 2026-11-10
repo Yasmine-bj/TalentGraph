@@ -62,3 +62,58 @@
 - Premier test `results_per_page=100` faussé par le cache (le nom du fichier ne contenait pas ce paramètre) → test refait sans cache.
 - Faux positifs de contrat (« apprentissage automatique » → alternance…) → motifs stricts pour la description, tests sur 22 phrases.
 - Pause de 3 s même sur le cache → pause uniquement après un vrai appel.
+
+
+## M2 — Schéma, chargement et indexation (octobre – novembre 2026)
+
+### Notions apprises — PostgreSQL
+- Clé primaire interne vs identifiant métier ; clé composée `(source, source_id)`.
+- UPSERT (`INSERT ... ON CONFLICT ... DO UPDATE`, `EXCLUDED`) et **idempotence**.
+- Contraintes : `NOT NULL`, `UNIQUE`, `CHECK`, `DEFAULT`, clé étrangère ; la base protège la qualité des données.
+- Types : `TEXT`, `NUMERIC` (exact, pour l'argent), `DOUBLE PRECISION`, `TIMESTAMPTZ`, `TEXT[]`, `JSONB`.
+- Index : rôle (éviter de lire toute la table), coût (écritures plus lentes, place) ; **B-tree** (égalité, tri, intervalles), **B-tree unique** (vitesse + interdiction des doublons), **GIN** (index inversé : « contient ») ; `EXPLAIN ANALYZE`.
+- Tableau dans la ligne vs table de liaison (jointure), normalisation et exception assumée.
+- Scripts d'initialisation (`/docker-entrypoint-initdb.d`), exécutés seulement sur un volume vide ; montage (*bind mount*) vs volume nommé.
+- psycopg : connexion, **curseur**, `execute` / `executemany` / `fetchone` / `fetchall`, lignes en tuples ou en dictionnaires (`dict_row`).
+- **Requêtes paramétrées** (`%(nom)s`) et **injection SQL**.
+- **Transactions** (COMMIT / ROLLBACK), `autocommit`, isolation (une transaction voit ses propres modifications avant le COMMIT).
+- Python : docstring, tuple (et virgule du tuple à un élément), déballage, `try / except / raise`, `Exception` vs `BaseException`, générateur avec `yield`, compréhension d'ensemble, `unicodedata` pour retirer les accents.
+- Variables d'environnement : obligatoires (`os.environ["X"]`) ou avec valeur par défaut (`os.environ.get("X", "y")`) ; ce qui change selon l'environnement va dans la configuration, pas dans le code.
+- Docker : `up -d`, `stop`, `down`, `down -v` (supprime les données), `ps`, `logs`, `exec` ; `up -d` ne recrée que ce qui a changé ; healthchecks (« le conteneur tourne » vs « le service est prêt ») ; client / serveur.
+
+### Notions apprises — Elasticsearch
+- Moteur de recherche : résultats **classés par pertinence** (score BM25 : fréquence du mot, rareté, longueur du champ) ; vocabulaire cluster / index / document / champ / mapping.
+- **Index inversé** (même principe que GIN) et **analyseurs** (découpage, minuscules, mots vides, racinisation) ; analyseur `standard` vs `french`.
+- `text` (analysé, pertinence) vs `keyword` (valeur exacte, filtres, comptages) ; sous-champs (`fields`) ; tout champ peut contenir plusieurs valeurs.
+- Mapping dynamique (deviné) vs mapping écrit, `dynamic: strict` ; options `index` et `doc_values` ; `_source`.
+- API REST : verbe HTTP (quoi faire) + adresse (sur quoi) ; actions réservées commençant par `_` (`_doc`, `_search`, `_mapping`, `_analyze`, `_count`, `_bulk`).
+- Requêtes : `match` (OU par défaut, `operator: and`), `bool` (`must` compte dans le score, `filter` est un oui/non sans effet sur le score), `term`, agrégations `terms` (`size: 0`).
+- Shards et répliques ; état vert / jaune.
+- « Presque temps réel » : un document n'est cherchable qu'après le *refresh* (~1 s).
+- Client Python : `Elasticsearch(url)`, `info()`, `indices.delete / create / refresh`, `helpers.bulk`, `count`.
+- Recherche par le sens (vecteurs, `dense_vector`) et recherche hybride : principe, pour l'étape suivante.
+
+### Mesures
+| Mesure | Résultat |
+|---|---|
+| Offres chargées dans PostgreSQL | 7 298 |
+| Relance du chargement | 0 insérée, 7 298 mises à jour (idempotent) |
+| Valeurs de région après nettoyage | 19 (13 métropole + 5 outre-mer + Nouvelle-Calédonie) + 602 sans région |
+| Variantes de régions corrigées | « Pays de la Loire » 478 → 481, « Centre-Val de Loire » 119 → 124 |
+| Paris | 708 offres département + 438 arrondissements ramenés à la ville « Paris » |
+| Documents dans l'index `offers` | 7 298 / 7 298 |
+| Tests de robustesse du chargement | rollback sur offre invalide, `Ctrl+C` et connexion coupée (23 520 offres) |
+
+### Problèmes rencontrés et solutions
+- Script SQL d'initialisation ignoré : le volume existait déjà → `docker compose down -v` (sans risque tant que la base est vide).
+- « authentification par mot de passe échouée » : un PostgreSQL installé sur Windows écoutait aussi sur le port 5432 (diagnostic `netstat`, `Get-Process`) → Docker publié sur 5433 (D16).
+- `POSTGRES_PORT` oublié dans `.env` : le script utilisait encore le port par défaut 5432.
+- `offers_sample.json` pas régénéré : régions encore brutes → relancer `fetch_offers.py` (0 appel, depuis le cache) avant le chargement.
+- `docker compose` lancé depuis le mauvais dossier (« no configuration file provided ») → toujours depuis la racine du projet.
+- Accents cassés dans PowerShell (`DÃ©veloppeuse`) : affichage seulement, la réponse UTF-8 était lue avec un autre encodage → Postman, ou décodage explicite en UTF-8.
+- Postman : bouton « Send » grisé dans un espace d'équipe en lecture seule → espace de travail personnel.
+- `no handler found for uri` : faute de frappe (`_analyse` au lieu de `_analyze`), puis retour à la ligne copié dans l'adresse (`%0A`).
+- Recherche vide sur `demo_fr` : les documents n'avaient pas été ajoutés à ce nouvel index.
+- Même score pour deux offres : analyseur `standard` (« développeuse » ≠ « développeur ») et critères BM25 identiques → mapping avec l'analyseur `french`.
+- Connexion refusée sur `localhost:9200` : Elasticsearch encore en démarrage (`health: starting`) → attendre `healthy`.
+- Verrou Git `.git/index.lock` laissé par une commande lancée depuis un environnement qui ne peut pas supprimer de fichiers → suppression manuelle du verrou.

@@ -29,6 +29,7 @@ POURQUOI UN CACHE ?
 import json             # lire / écrire du JSON (format des réponses et du cache)
 import os               # os.environ : les variables d'environnement (nos clés)
 import time             # time.sleep : faire une pause entre deux appels
+import unicodedata      # retirer les accents (comparaison des noms de régions)
 from pathlib import Path  # manipuler des chemins de fichiers, quel que soit l'OS
 
 import requests         # bibliothèque de référence pour les requêtes HTTP
@@ -262,6 +263,125 @@ def fetch_page(
 # 2. TRADUIRE UNE OFFRE ADZUNA VERS NOTRE FORMAT
 # ---------------------------------------------------------------------------
 
+# Noms de régions : Adzuna n'écrit pas toujours la même région de la même façon.
+# Variantes mesurées sur nos 7 298 offres :
+#   "Ile-de-France" (sans accent), "Hauts-De-France", "Grand-Est",
+#   "Pays de la Loire" / "Pays-de-la-Loire" / "Paysde-la-Loire",
+#   "Centre" / "Centre-Val-de-Loire" / "Centre-Val-De-Loire"...
+# Le filtre région du formulaire exige UNE seule écriture par région.
+# Méthode : on compare une "clé" simplifiée (sans accents, sans majuscules,
+# sans tirets ni espaces) à celle des noms officiels :
+#   "Paysde-la-Loire" -> "paysdelaloire" <- "Pays de la Loire" (nom officiel)
+# Ainsi, toute variante de ce type est reconnue, même une nouvelle.
+
+# Les 18 régions françaises (13 de métropole + 5 d'outre-mer), noms officiels.
+OFFICIAL_REGIONS = [
+    "Auvergne-Rhône-Alpes", "Bourgogne-Franche-Comté", "Bretagne",
+    "Centre-Val de Loire", "Corse", "Grand Est", "Hauts-de-France",
+    "Île-de-France", "Normandie", "Nouvelle-Aquitaine", "Occitanie",
+    "Pays de la Loire", "Provence-Alpes-Côte d'Azur",
+    "Guadeloupe", "Martinique", "Guyane", "La Réunion", "Mayotte",
+]
+
+# Noms qui ne se ramènent pas à un nom officiel par simple simplification.
+REGION_ALIASES = {
+    "Centre": "Centre-Val de Loire",  # ancien nom de la région (119 offres)
+    "DOM-TOM": "Outre-mer",           # outre-mer sans territoire précisé (voir plus bas)
+}
+
+
+def _region_key(name: str) -> str:
+    """Clé simplifiée d'un nom : sans accents, en minuscules, lettres seulement.
+
+    "Île-de-France" -> "iledefrance" ; "Paysde-la-Loire" -> "paysdelaloire".
+    unicodedata.normalize("NFKD", ...) sépare chaque lettre de son accent
+    ("é" -> "e" + accent) ; on ne garde ensuite que les lettres et chiffres
+    (c.isalnum()), ce qui supprime accents, tirets, espaces et apostrophes.
+    """
+    decomposed = unicodedata.normalize("NFKD", name)
+    return "".join(c for c in decomposed if c.isalnum() and c.isascii()).lower()
+
+
+# Dictionnaire clé -> nom officiel, construit une seule fois au chargement du module.
+#   {**a, **b} fusionne deux dictionnaires.
+_REGION_BY_KEY = {
+    **{_region_key(name): name for name in OFFICIAL_REGIONS},
+    **{_region_key(alias): name for alias, name in REGION_ALIASES.items()},
+}
+
+
+def normalize_region(region: str) -> str:
+    """Nom officiel de la région ; inchangé si elle n'est pas reconnue.
+
+    ex. "Paysde-la-Loire" -> "Pays de la Loire" ; "Centre" -> "Centre-Val de Loire" ;
+        "Nouvelle-Calédonie" -> "Nouvelle-Calédonie" (pas une région : gardée telle quelle).
+    """
+    return _REGION_BY_KEY.get(_region_key(region), region)
+
+
+# Outre-mer : Adzuna insère un niveau "DOM-TOM" (ancien terme) entre le pays
+# et la vraie région : ["France", "DOM-TOM", "La Réunion", "Saint-Denis"].
+# Mesuré sur nos offres : La Réunion 21, Martinique 4, Guadeloupe 3,
+# Nouvelle-Calédonie 2, Guyane 1, Mayotte 1.
+OVERSEAS_LABEL = "DOM-TOM"
+
+
+def _split_area(area: list[str]) -> tuple[str | None, str | None, str | None]:
+    """Découpe la localisation Adzuna en (région, département, ville), noms harmonisés.
+
+    Adzuna décrit le lieu par une liste du plus large au plus précis :
+        ["France", "Bretagne", "Finistère", "Brest"]
+        indice 0 = pays, 1 = région, 2 = département, puis ville / commune.
+
+    Exemples (vérifiés sur nos 7 298 offres) :
+        ["France", "Bretagne", "Finistère", "Brest"]        -> ("Bretagne", "Finistère", "Brest")
+        ["France", "Ile-de-France", "Paris"]                -> ("Île-de-France", "Paris", "Paris")
+        ["France", "Ile-de-France", "Paris",
+         "1er Arrondissement"]                              -> ("Île-de-France", "Paris", "Paris")
+        ["France", "Occitanie", "Haute-Garonne"]            -> ("Occitanie", "Haute-Garonne", None)
+        ["France", "Provence-Alpes-Côte d'Azur", "Var",
+         "Draguignan", "Le Luc"]                            -> ("Provence-Alpes-Côte d'Azur", "Var", "Le Luc")
+        ["France", "Centre", "Loiret", "Orléans"]           -> ("Centre-Val de Loire", "Loiret", "Orléans")
+        ["France", "DOM-TOM", "La Réunion", "Saint-Denis"]  -> ("La Réunion", "La Réunion", "Saint-Denis")
+        ["France", "DOM-TOM", "Martinique"]                 -> ("Martinique", "Martinique", None)
+        ["France", "Ile-de-France"]                         -> ("Île-de-France", None, None)
+        ["France"]                                          -> (None, None, None)   # offre nationale
+
+    Règles :
+      1. Outre-mer : on retire le niveau "DOM-TOM" ; le territoire ("La Réunion")
+         devient la région ET le département (comme Paris, ville ET département).
+      2. Région harmonisée (normalize_region : variantes -> nom officiel).
+      3. Ville = DERNIER élément (le plus précis), à partir de 4 éléments.
+         Avec 3 éléments, l'offre n'est localisée qu'au DÉPARTEMENT (ex. 206 offres
+         "Haute-Garonne" sans ville) : pas de ville.
+         Exception : Paris, à la fois département et ville. Ville = "Paris", y
+         compris pour les arrondissements (sinon ville = "1er Arrondissement").
+    """
+    # 1. Outre-mer : ["France", "DOM-TOM", "La Réunion", "Saint-Denis"]
+    #             -> ["France", "La Réunion", "La Réunion", "Saint-Denis"]
+    #    [*area[2:]] : tous les éléments à partir de l'indice 2 ("déballés").
+    if len(area) >= 3 and area[1] == OVERSEAS_LABEL:
+        area = [area[0], area[2], *area[2:]]
+
+    # Une condition sur la longueur évite une IndexError si la liste est courte.
+    region = area[1] if len(area) >= 2 else None
+    # 2. Nom officiel de la région (voir normalize_region).
+    if region is not None:
+        region = normalize_region(region)
+
+    department = area[2] if len(area) >= 3 else None
+
+    # 3. Ville.
+    if department == "Paris":
+        city = "Paris"           # Paris : département ET ville ; les arrondissements
+                                 # ("1er Arrondissement"...) sont ramenés à "Paris"
+    elif len(area) >= 4:
+        city = area[-1]          # area[-1] = dernier élément (le plus précis)
+    else:
+        city = None              # localisée au département seulement
+    return region, department, city
+
+
 def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
     """Convertit UNE offre au format Adzuna vers notre format commun JobOffer.
 
@@ -296,6 +416,11 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         Sans ce "or {}", None.get(...) ferait planter tout le programme
         à cause d'UNE seule offre incomplète.
     """
+    # Localisation découpée (voir _split_area). "or {}" / "or []" : au cas où
+    # le sous-objet ou la liste manquerait.
+    location = raw.get("location") or {}
+    region, department, city = _split_area(location.get("area") or [])
+
     # Contrat déduit (texte, puis champ brut d'Adzuna en dernier recours).
     # Un tuple se "déballe" en deux variables : types, source = (a, b).
     contract_types, contract_source = detect_contract(
@@ -309,11 +434,17 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         source_id=str(raw.get("id")),   # str() : on stocke l'identifiant en texte
         title=raw.get("title", ""),
         company=(raw.get("company") or {}).get("display_name"),
-        location=(raw.get("location") or {}).get("display_name"),
+        location=location.get("display_name"),
+        region=region,
+        department=department,
+        city=city,
+        latitude=raw.get("latitude"),
+        longitude=raw.get("longitude"),
         # Contrat déduit plus haut ; on garde aussi la valeur brute d'Adzuna.
         contract_types=contract_types,
         contract_source=contract_source,        # d'où vient le contrat (niveau de confiance)
         contract_raw=raw.get("contract_type"),
+        contract_time=raw.get("contract_time"),  # "full_time", "part_time" ou None
         category=(raw.get("category") or {}).get("label"),
         description=raw.get("description", ""),
         salary_min=raw.get("salary_min"),
@@ -321,6 +452,7 @@ def to_job_offer(raw: dict, search_keywords: str | None = None) -> JobOffer:
         created_at=raw.get("created"),          # Adzuna l'appelle "created"
         search_keywords=search_keywords,       # la recherche d'origine
         url=raw.get("redirect_url", ""),        # Adzuna l'appelle "redirect_url"
+        raw=raw,                                # l'offre brute complète (-> JSONB)
     )
 
 
@@ -346,6 +478,17 @@ def fetch_offers(
     # Annotation : offers est une liste de JobOffer, vide au départ.
     offers: list[JobOffer] = []
 
+    # Étiquette de la recherche, stockée dans chaque offre (search_keywords).
+    # Pour une recherche ciblée, on ajoute le contrat visé entre crochets :
+    #   "data" + {"title_only": "alternance"} -> "data [alternance]"
+    # Sinon, on ne saurait pas que l'offre vient d'une recherche d'alternances.
+    title_only = (extra_params or {}).get("title_only")
+    # (Pas de crochets si title_only répète les mots-clés : "cloud", pas "cloud [cloud]".)
+    if title_only and title_only != keywords:
+        search_label = f"{keywords} [{title_only}]"
+    else:
+        search_label = keywords
+
     # range(1, max_pages + 1) produit 1, 2, ..., max_pages
     # (le +1 car range s'arrête AVANT la borne de fin ; Adzuna commence à la page 1).
     for page in range(1, max_pages + 1):
@@ -361,7 +504,7 @@ def fetch_offers(
         #   to_job_offer(r) for r in raw_results  -> un GÉNÉRATEUR : applique
         #   to_job_offer à chaque offre, une par une.
         #   .extend(...) ajoute tous ces éléments à la fin de la liste.
-        offers.extend(to_job_offer(r, search_keywords=keywords) for r in raw_results)
+        offers.extend(to_job_offer(r, search_keywords=search_label) for r in raw_results)
 
         # Une page INCOMPLÈTE (moins de RESULTS_PER_PAGE offres) est forcément
         # la dernière : Adzuna remplit chaque page au maximum avant de passer
