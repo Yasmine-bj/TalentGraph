@@ -108,6 +108,56 @@ services:
 
     restart: unless-stopped
 
+  # ---------------------------------------------------------------
+  # API : notre serveur FastAPI (module M3)
+  # Rôle : faire le lien entre l'interface web et les trois bases.
+  # Image construite à partir de api/Dockerfile (notre code).
+  # ---------------------------------------------------------------
+  api:
+    # Construire l'image à partir du dossier api/ (qui contient le Dockerfile),
+    # au lieu de télécharger une image toute prête comme pour les bases.
+    build: ./api
+
+    # Variables lues par api/app/db.py.
+    # Dans le réseau Docker, chaque base se joint par le NOM DE SON SERVICE,
+    # sur son port INTERNE (5432 pour PostgreSQL, pas le 5433 de ton PC).
+    # ${...} : valeurs lues dans le fichier .env (les secrets ne sont pas ici).
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REDIS_HOST: redis
+      ES_URL: http://elasticsearch:9200
+
+    # port_du_PC:port_du_conteneur -> http://localhost:8000 depuis ton navigateur.
+    ports:
+      - "8000:8000"
+
+    # Ne démarrer l'API que lorsque les trois bases sont PRÊTES (healthy),
+    # pas seulement démarrées : évite les erreurs pendant que
+    # Elasticsearch démarre (20 à 60 s).
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+    # L'API est "healthy" si sa route /health répond 200.
+    # Lancé DANS le conteneur : ici, localhost = le conteneur api lui-même.
+    # L'image python:slim n'a pas curl : on utilise Python. urlopen lève une
+    # erreur si le code n'est pas 200 (ex. 503) -> conteneur "unhealthy".
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+    restart: unless-stopped
+
 volumes:
   pg_data:
   redis_data:   # journal AOF de Redis
