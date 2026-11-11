@@ -2,3 +2,4 @@ python-dotenv==1.2.4
 requests==2.34.2
 psycopg[binary]==3.3.6
 elasticsearch==9.2.1
+sentence-transformers==6.3.0
