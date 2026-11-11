@@ -1,6 +1,15 @@
+# Index supplémentaire de PyTorch : il contient les versions "CPU seulement"
+# de torch (~200 Mo), au lieu de la version avec CUDA de PyPI (plusieurs Go).
+# Notre conteneur n'a pas de carte graphique : CUDA ne servirait à rien.
+--extra-index-url https://download.pytorch.org/whl/cpu
 fastapi==0.162.4
 uvicorn[standard]==0.54.0
 psycopg[binary]==3.3.6
 redis==8.1.0
 elasticsearch==9.2.1
 email-validator==2.3.0
+# Embeddings de la recherche (M4) : MÊMES versions que worker/requirements.txt,
+# pour que le CV et les offres soient transformés par le même calcul.
+# torch==2.15.0 accepte aussi "2.15.0+cpu" (index ci-dessus), que pip préfère.
+torch==2.15.0
+sentence-transformers==6.3.0
