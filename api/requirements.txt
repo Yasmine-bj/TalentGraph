@@ -1,0 +1,6 @@
+fastapi==0.162.4
+uvicorn[standard]==0.54.0
+psycopg[binary]==3.3.6
+redis==8.1.0
+elasticsearch==9.2.1
+email-validator==2.3.0

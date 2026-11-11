@@ -1,0 +1,16 @@
+# =============================================================================
+# api/.dockerignore — Fichiers à NE PAS copier dans l'image de l'API
+#
+# Équivalent d'un .gitignore, mais pour Docker : lors du build, les fichiers
+# listés ici sont ignorés par les instructions COPY du Dockerfile.
+# =============================================================================
+
+# Caches Python générés sur ton PC : inutiles et encombrants dans l'image.
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# SÉCURITÉ : un fichier de secrets ne doit JAMAIS finir dans une image
+# (une image peut être partagée ou publiée, et son contenu lu par n'importe qui).
+# Les variables d'environnement sont transmises AU DÉMARRAGE par docker-compose.yml.
+.env
