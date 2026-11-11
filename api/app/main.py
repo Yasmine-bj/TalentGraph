@@ -16,12 +16,17 @@ ROUTES ACTUELLES :
                                dans PostgreSQL, et le statut dans Redis.
     GET  /api/searches/{id}  : relit une demande (PostgreSQL) et son statut
                                en direct (Redis).
+    POST /api/search/preview : TESTE la recherche hybride (Elasticsearch),
+                               sans rien enregistrer (M4).
+    GET  /api/regions        : liste des régions acceptées (liste déroulante
+                               du formulaire, M4).
 
 DOCUMENTATION AUTOMATIQUE (générée par FastAPI) :
     http://localhost:8000/docs  -> liste des routes, avec un bouton pour les tester
 """
 
 from datetime import datetime, timezone
+from typing import get_args  # get_args(Literal["a", "b"]) -> ("a", "b")
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse  # réponse JSON avec un code HTTP choisi
@@ -30,7 +35,9 @@ from psycopg.rows import dict_row           # lignes PostgreSQL en dictionnaires
 # Connexions aux bases (voir db.py). "app.db" = le fichier app/db.py.
 from app.db import es_client, get_pg_connection, redis_client
 # Forme des données reçues et renvoyées (voir schemas.py).
-from app.schemas import SearchCreate, SearchCreated, SearchOut
+from app.schemas import OfferResult, Region, SearchCreate, SearchCreated, SearchOut, SearchQuery
+# Recherche hybride BM25 + kNN + RRF (voir search.py).
+from app.search import hybrid_search
 
 # ---------------------------------------------------------------------------
 # L'APPLICATION
@@ -268,3 +275,55 @@ def get_search(search_id: int):
 
     # SearchOut(**row) : crée le modèle à partir du dictionnaire ("déballé").
     return SearchOut(**row)
+
+
+# ---------------------------------------------------------------------------
+# ROUTE POST /api/search/preview : tester la recherche hybride (M4)
+# ---------------------------------------------------------------------------
+# Une route de TEST : elle renvoie directement les offres trouvées, sans
+# enregistrer de candidat ni de demande. Elle sert à vérifier et régler la
+# recherche depuis /docs. (À l'étape 5, le mode 1 de POST /api/searches
+# appellera la même fonction hybrid_search, puis enregistrera le résultat.)
+#
+# Le verbe est POST et non GET : on envoie un CORPS JSON (le CV peut faire
+# des milliers de caractères, trop long pour une adresse).
+# response_model=list[OfferResult] : la réponse est une LISTE d'offres.
+
+@app.post("/api/search/preview", response_model=list[OfferResult])
+def preview_search(query: SearchQuery):
+    """Recherche hybride (mots + sens) dans les offres, sans enregistrement."""
+    try:
+        results = hybrid_search(
+            es_client,
+            cv_text=query.cv_text,
+            job_title=query.job_title,
+            region=query.region,
+            contract_types=query.contract_types,
+            salary_min=query.salary_min,
+        )
+    except Exception as error:
+        # Elasticsearch indisponible, index absent... : 503 avec le TYPE de
+        # l'erreur seulement (même règle que /health), le détail dans les logs.
+        print(f"[search] recherche impossible : {error!r}")
+        raise HTTPException(status_code=503, detail=f"Recherche indisponible : {type(error).__name__}")
+
+    # Chaque dictionnaire devient un OfferResult (validé et documenté).
+    return [OfferResult(**offer) for offer in results]
+
+
+# ---------------------------------------------------------------------------
+# ROUTE GET /api/regions : les régions du formulaire (M4)
+# ---------------------------------------------------------------------------
+# Ajoutée au M4, après les tests : la région est maintenant une LISTE FERMÉE
+# (Region, dans schemas.py). Le formulaire React (M7) appellera cette route
+# pour construire sa liste déroulante, au lieu de recopier les 19 régions
+# en JavaScript : la liste n'existe qu'à UN endroit (schemas.py), et le
+# formulaire ne peut pas proposer une région que l'API refuserait.
+# Pas de base de données ici : la liste est dans le code.
+
+@app.get("/api/regions", response_model=list[str])
+def list_regions():
+    """Régions acceptées par le champ "region" (pour la liste déroulante)."""
+    # get_args(Region) lit les valeurs écrites dans Literal[...] (un tuple) ;
+    # list(...) le transforme en liste, renvoyée en JSON.
+    return list(get_args(Region))
