@@ -12,7 +12,7 @@ est à PostgreSQL.
 - **PostgreSQL** est la **source de vérité** (table `offers`).
 - **Elasticsearch** est un **index de recherche** reconstruit à partir de PostgreSQL
   par `worker/index_offers.py` : recherche par pertinence, filtres, comptages
-  (agrégations), et plus tard recherche par le sens (vecteurs).
+  (agrégations), et recherche par le sens (vecteurs, champ `embedding`).
 - Il ne contient donc **que ce qui sert à chercher, filtrer, compter ou afficher**.
 - Seules les offres **actives** sont indexées ; une offre expirée est retirée
   (voir `docs/decisions.md`, D12).
@@ -161,17 +161,151 @@ dans PostgreSQL.
 | `status` | seules les offres actives sont indexées |
 | `latitude`, `longitude` | réunies dans `location` |
 
-## Évolutions prévues
+## Recherche par le sens : le champ `embedding` (M4)
 
-Le champ **vecteur** de la recherche par le sens (étape 6) sera **ajouté** :
+| Champ | Type | Contenu | Rôle |
+|---|---|---|---|
+| `embedding` | `dense_vector` | 384 nombres : le **sens** du titre + de la description | recherche **kNN** (offres les plus proches du CV, par le sens) |
 
 ```json
-"embedding": { "type": "dense_vector", "dims": 384, "similarity": "cosine" }
+"embedding": { "type": "dense_vector", "dims": 384, "index": true, "similarity": "cosine" }
 ```
 
-(`dims` dépendra du modèle choisi.) **Ajouter** un champ à un mapping est
-autorisé ; **changer le type** d'un champ existant ne l'est pas : il faut alors
-recréer l'index et tout réindexer (quelques secondes, à partir de PostgreSQL).
+| Réglage | Signification |
+|---|---|
+| `type: dense_vector` | un vecteur de nombres à virgule, de taille fixe (« dense » : toutes les cases sont remplies) |
+| `dims: 384` | la taille du vecteur ; **doit être égale** à `EMBEDDING_DIMS` de `embeddings.py` (sinon le document est refusé) |
+| `index: true` | construire l'index **HNSW**, pour une recherche kNN rapide |
+| `similarity: cosine` | comparer deux vecteurs par le **cosinus** de leur angle (1 = même direction = même sens) |
+
+- **Texte vectorisé** : `"passage: " + titre + ". " + description`, par le modèle
+  `intfloat/multilingual-e5-small` (`worker/embeddings.py`, appelé par `worker/index_offers.py`).
+  Le CV ou la recherche de l'utilisateur est vectorisé par le **même** modèle,
+  avec le préfixe `"query: "` (`api/app/embeddings.py`).
+- **Même modèle et mêmes `dims` des deux côtés** : deux modèles différents produisent
+  des vecteurs dans des « espaces » différents, incomparables. Changer de modèle
+  impose de réindexer toutes les offres.
+- **HNSW** (*Hierarchical Navigable Small World*) : un graphe où chaque vecteur est
+  relié à ses voisins proches. La recherche part d'un point et « saute » de voisin
+  en voisin vers la zone la plus proche du vecteur cherché, sans comparer les
+  ~7 300 vecteurs un par un. Résultat **approximatif** (on peut rater un voisin de
+  temps en temps) mais très rapide.
+- **kNN** (*k-Nearest Neighbors*) : trouver les *k* vecteurs les plus proches.
+  Paramètres d'une requête : `k` (combien de résultats) et `num_candidates`
+  (combien de candidats examiner : plus il est grand, plus le résultat est
+  précis et plus c'est lent).
+- Les scores cosinus de ce modèle sont « tassés » (souvent entre 0,7 et 0,9) :
+  seul l'**ordre** compte, d'où la fusion par rangs (RRF) dans la recherche hybride.
+- Taille : 384 nombres × 4 octets ≈ 1,5 Ko par offre, ~11 Mo pour 7 300 offres
+  (plus l'index HNSW).
+
+## L'index HNSW en détail
+
+Avec `"index": true`, Elasticsearch construit **par défaut** un index **HNSW**
+pour chaque champ `dense_vector` : on n'a pas besoin de le demander
+explicitement. Les réglages réellement appliqués (dont une éventuelle
+**quantification**, voir plus bas) sont visibles avec
+`GET /offers/_mapping` (clé `index_options`).
+
+### Le principe : un graphe de voisins, à plusieurs étages
+
+HNSW = *Hierarchical Navigable Small World* (« petit monde navigable hiérarchique »).
+
+- **Graphe** : chaque vecteur (chaque offre) est un **point**, relié par des
+  « routes » à quelques-uns de ses **voisins les plus proches** (paramètre `m`,
+  16 par défaut).
+- **Étages** : tous les points sont dans l'étage du bas (étage 0) ; une petite
+  partie, tirée au hasard, monte aussi à l'étage 1 ; une partie encore plus
+  petite à l'étage 2, etc. Les étages du haut ont **peu de points, reliés de
+  loin en loin** (des « autoroutes ») ; l'étage du bas a **tous les points,
+  reliés de proche en proche** (des « rues »).
+
+```
+étage 2 :   A ─────────────────────── F                     (quelques points, grands sauts)
+étage 1 :   A ───── C ────── E ────── F ───── H             (plus de points)
+étage 0 :   A ─ B ─ C ─ D ─ E ─ F ─ G ─ H ─ I ─ J ...       (tous les points, petits pas)
+```
+
+### La recherche : descendre les étages
+
+Pour trouver les offres les plus proches du vecteur du CV :
+
+1. on part d'un **point d'entrée** à l'étage le plus haut ;
+2. on regarde ses voisins : on se déplace vers celui qui est **plus proche** du
+   CV, et on recommence tant qu'on se rapproche (grands sauts) ;
+3. quand on ne se rapproche plus, on **descend d'un étage** et on recommence
+   (sauts plus petits) ;
+4. à l'étage 0, on explore plus largement autour de la meilleure zone : on garde
+   une liste de `num_candidates` candidats, et on renvoie les `k` meilleurs.
+
+Comme pour trouver une adresse : l'avion jusqu'à la bonne région, l'autoroute
+jusqu'à la bonne ville, puis les rues jusqu'à la bonne maison, au lieu de
+visiter toutes les maisons du pays.
+
+### La construction : à chaque document indexé
+
+Quand `index_offers.py` envoie une offre, Elasticsearch l'**insère** dans le
+graphe : il tire au hasard son étage le plus haut, cherche ses voisins les plus
+proches à chaque étage (en explorant `ef_construction` candidats, 100 par
+défaut), puis crée les « routes ». C'est pourquoi l'indexation avec vecteurs est
+un peu plus lente que sans.
+
+### Le compromis : approximatif mais rapide
+
+| | Comparer tous les vecteurs (force brute) | HNSW |
+|---|---|---|
+| Résultat | **exact** | **approximatif** (peut rater un voisin de temps en temps) |
+| Vitesse | proportionnelle au nombre d'offres | quasi constante, même avec des millions de vecteurs |
+
+Réglages qui jouent sur ce compromis :
+
+| Réglage | Où | Plus grand = |
+|---|---|---|
+| `m` | mapping (`index_options`) | plus de routes par point : plus précis, plus de mémoire |
+| `ef_construction` | mapping (`index_options`) | graphe de meilleure qualité, indexation plus lente |
+| `num_candidates` | chaque requête kNN | recherche plus précise, plus lente |
+
+On garde les valeurs par défaut, adaptées à notre volume (~7 300 offres).
+
+### La quantification (selon la version)
+
+Pour économiser la mémoire, les versions récentes d'Elasticsearch peuvent
+**compresser** les vecteurs dans l'index HNSW (par exemple chaque nombre sur
+1 octet au lieu de 4 : `int8_hnsw`, ou encore plus compact : `bbq_hnsw`). Le
+graphe sert alors à trouver vite les candidats, puis les vecteurs complets
+(conservés à part) peuvent servir à affiner le classement. Le type appliqué à
+notre index est visible dans `index_options` (voir plus haut).
+
+## Comment `worker/index_offers.py` remplit l'index
+
+```
+1. connect_es()        Elasticsearch joint (GET /, échoue tout de suite s'il ne répond pas)
+2. read_offers()       offres ACTIVES lues dans PostgreSQL (sans la colonne raw)
+3. embed_passages()    pour chaque lot de 64 offres (~115 lots pour 7 300 offres) :
+                         a. ajouter "passage: " devant chaque texte (titre + description)
+                         b. découper en tokens, puis en numéros (le tokenizer)
+                         c. PyTorch : passer les numéros dans les 12 couches du modèle,
+                            avec ses ~118 millions de poids
+                         d. faire la moyenne des vecteurs des tokens -> 1 vecteur par offre
+                         e. normaliser (longueur 1)
+                       -> un vecteur de 384 nombres par offre, gardé en mémoire
+                       (étape la plus longue : quelques minutes sur CPU ; faite AVANT
+                        de supprimer l'ancien index, pour qu'un échec le laisse intact)
+4. recreate_index()    supprimer "offers", puis le recréer avec offers_mapping.json
+5. helpers.bulk()      envoyer les documents (champs + vecteur) par paquets de 500
+                       -> Elasticsearch insère chaque vecteur dans le graphe HNSW
+6. refresh + count     rendre les documents cherchables, puis vérifier :
+                       documents dans l'index = offres lues dans PostgreSQL
+```
+
+## Évolutions
+
+- ✅ **Fait (M4)** : champ `embedding` ajouté (recherche par le sens).
+  Ajouter un champ à un mapping est permis ; **changer le type** d'un champ
+  existant ne l'est pas : il faut recréer l'index et tout réindexer (ce que fait
+  `index_offers.py` à chaque lancement, à partir de PostgreSQL).
+- Prévu (M6) : réindexer avec le modèle **fine-tuné** (variable d'environnement
+  `EMBEDDING_MODEL`), et mesurer le gain.
 
 ## Tester le mapping à la main
 
