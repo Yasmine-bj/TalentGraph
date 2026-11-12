@@ -111,16 +111,25 @@ critères du formulaire
 Chaque résultat contient `score`, `rank_bm25`, `rank_knn`, `rank_exact`
 (`null` = hors des 100 premières de cette recherche). Choix et tests : D19 à D24.
 
-## Évolution prévue (M4/M5)
+## Traitement d'une demande en arrière-plan (M4)
 
-Une fonction `update_search_status(id, status, results=None, error_message=None)`
-mettra à jour **PostgreSQL puis Redis** à chaque étape du traitement, lancé en
-arrière-plan (`BackgroundTasks`) pour que `POST /api/searches` réponde tout de suite :
+`POST /api/searches` répond tout de suite (`201`, `pending`), PUIS FastAPI exécute
+`run_search` en arrière-plan (`BackgroundTasks`) :
 
 ```
-pending ──► running ──► done   (results rempli, finished_at)
-                    └─► failed (error_message rempli)
+pending ──► running ──► done   (results = {"offers": [...20 offres...]}, finished_at)
+                    └─► failed (error_message, finished_at)
 ```
+
+- `update_search_status(id, status, results, error_message)` : écrit **PostgreSQL
+  puis Redis** à chaque changement ; `finished_at` est rempli pour `done` / `failed`.
+- Mode `offers` : recherche hybride (voir plus haut), offres enregistrées dans
+  `searches.results` (JSONB). Modes `skills`, `cv`, `letter` : `failed` avec le message
+  « disponible au M5 ».
+- Toute erreur passe la demande en `failed` : elle ne reste jamais bloquée en `running`.
+  Détail des erreurs : `docker compose logs api`.
+- La page web suit l'avancement en répétant `GET /api/searches/{id}` (polling) ;
+  ces lectures fréquentes sont servies par Redis.
 
 ## Vérifier la persistance (ce que fera le correcteur)
 
@@ -129,6 +138,10 @@ Terminal 1 — PostgreSQL :
 docker compose exec postgres psql -U talentgraph -d talentgraph
 SELECT * FROM candidates;
 SELECT id, candidate_id, mode, job_title, region, contract_types, status FROM searches;
+SELECT id, mode, status, finished_at - created_at AS duree,
+       jsonb_array_length(results->'offers') AS nb_offres,
+       results->'offers'->0->>'title' AS premiere_offre, error_message
+FROM searches ORDER BY id DESC LIMIT 5;
 ```
 
 Terminal 2 — Redis :

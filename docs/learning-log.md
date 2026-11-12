@@ -133,6 +133,10 @@
 - Agrégations pour diagnostiquer : `terms`, `missing`, `track_total_hits`.
 - FastAPI : route de test sans enregistrement, `response_model=list[...]`, `typing.get_args` pour lire un `Literal`.
 - Docker : index de paquets supplémentaire (`--extra-index-url`), volume de cache.
+- **Tâches de fond** (`BackgroundTasks`) : `add_task(fonction, arguments...)` programme la fonction (sans parenthèses = pas exécutée tout de suite) ; FastAPI envoie la réponse PUIS l'exécute, dans un thread à part. Une fonction Python est un objet transmissible.
+- **Polling** : la page redemande le statut toutes les secondes jusqu'à `done` / `failed`.
+- `UPDATE ... RETURNING` pour savoir si la ligne existait ; `COALESCE` pour ne pas effacer une valeur ; `CASE WHEN` ; JSONB : `Jsonb(...)` à l'écriture (psycopg), `->`, `->>`, `jsonb_array_length` à la lecture (SQL).
+- Pydantic `model_dump(mode="json")` : dictionnaire compatible JSON (dates en texte).
 
 ### Journal des tests (CV data, métier « data engineer », alternance)
 | Test | Constat | Correction |

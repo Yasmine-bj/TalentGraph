@@ -220,3 +220,11 @@ Chaque décision technique importante : ce qui a été choisi, pourquoi, et les 
 ## D24 — CV obligatoire, métier facultatif (M4)
 - Décision : `cv_text` obligatoire (50 à 20 000 caractères) ; `job_title` facultatif.
 - Pourquoi : les quatre modes partent du CV ; la recherche par sens fonctionne toujours avec le CV seul ; le métier, s'il est donné, active la recherche par mots et passe en tête du texte du kNN.
+
+## D25 — Traitement en arrière-plan avec `BackgroundTasks` (M4)
+- Décision : `POST /api/searches` enregistre la demande, répond `201 pending`, puis FastAPI exécute `run_search` après l'envoi de la réponse ; la page suit l'avancement par polling (`GET /api/searches/{id}`, statut en direct dans Redis).
+- Pourquoi : la recherche prend ~1 s aujourd'hui, mais 10 à 30 s au M5 (agents IA) : le navigateur ne doit pas rester bloqué.
+- `run_search` reçoit le formulaire déjà validé (même programme) : pas de relecture de la base.
+- Limite acceptée : la tâche vit en mémoire dans le conteneur `api` ; un redémarrage pendant le traitement la perd (demande bloquée en `running`).
+- Alternative pour la production : une file de tâches (liste Redis + conteneur `worker`) ; le worker ne recevrait que l'identifiant et relirait PostgreSQL.
+- Polling plutôt que WebSocket / Server-Sent Events : plus simple, suffisant ici.
