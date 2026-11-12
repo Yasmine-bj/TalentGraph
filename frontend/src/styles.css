@@ -1,0 +1,25 @@
+/* =============================================================================
+   styles.css — Les quelques styles globaux qui ne viennent pas de Mantine.
+   ============================================================================= */
+
+/* Fond de page légèrement teinté : les cartes blanches ressortent mieux. */
+body {
+  background: #f5f6fb;
+}
+
+/* Cartes d'offres : légère élévation au survol. */
+.offer-card {
+  transition: transform 150ms ease, box-shadow 150ms ease;
+}
+.offer-card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(49, 46, 129, 0.12);
+}
+
+/* Le formulaire reste visible quand on fait défiler les résultats (grand écran). */
+@media (min-width: 62em) {
+  .sticky-form {
+    position: sticky;
+    top: 16px;
+  }
+}
