@@ -1,0 +1,6 @@
+# Ce qui n'entre PAS dans le contexte de build du frontend :
+# node_modules est réinstallé DANS l'image (npm ci) ; dist est reconstruit.
+node_modules
+dist
+.env*
+npm-debug.log*
