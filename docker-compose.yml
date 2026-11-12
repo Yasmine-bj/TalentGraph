@@ -213,6 +213,29 @@ services:
 
     restart: unless-stopped
 
+
+  # ---------------------------------------------------------------
+  # Frontend : l'interface web (React + Mantine), servie par nginx
+  # Image en deux étapes (frontend/Dockerfile) : Node construit la page,
+  # nginx la sert et transmet /api/... au conteneur api (frontend/nginx.conf).
+  # Adresse pour le navigateur : http://localhost:3000
+  # ---------------------------------------------------------------
+  frontend:
+    build: ./frontend
+
+    # port_du_PC:port_du_conteneur. nginx écoute sur 80 DANS le conteneur ;
+    # 3000 sur le PC (le port 80 est souvent déjà pris sous Windows).
+    ports:
+      - "3000:80"
+
+    # nginx doit pouvoir joindre "api" dès son démarrage : on attend que
+    # l'API soit prête (healthy), donc aussi le loader et les bases.
+    depends_on:
+      api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
 volumes:
   pg_data:
   redis_data:   # journal AOF de Redis
