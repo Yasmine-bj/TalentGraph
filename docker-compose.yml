@@ -5,10 +5,14 @@ services:
 
   postgres:
     image: postgres:16
+    # ${X:-talentgraph} : la valeur du fichier .env S'IL EXISTE, sinon
+    # "talentgraph". Le correcteur peut ainsi lancer le projet SANS .env
+    # (git clone, puis docker compose up). Valeurs par défaut réservées à la
+    # démo LOCALE : sur le serveur, un .env avec un mot de passe fort.
     environment:
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-talentgraph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-talentgraph}
+      POSTGRES_DB: ${POSTGRES_DB:-talentgraph}
     ports:
        # port_du_PC:port_du_conteneur
       # 5433 côté PC : le port 5432 est déjà pris par un PostgreSQL installé
@@ -24,7 +28,7 @@ services:
       - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
       # Scripts SQL d'initialisation (création des tables).
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-talentgraph} -d ${POSTGRES_DB:-talentgraph}"]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -109,6 +113,44 @@ services:
     restart: unless-stopped
 
   # ---------------------------------------------------------------
+  # Loader : remplit les bases au premier démarrage (livraison, D10)
+  # Charge seed/demo_offers.json dans PostgreSQL et construit l'index
+  # Elasticsearch (embeddings compris) SI c'est nécessaire, puis s'arrête.
+  # Chez nous (bases déjà pleines) : ne fait rien, s'arrête en 1 seconde.
+  # ---------------------------------------------------------------
+  loader:
+    # Contexte = la RACINE du projet (pour copier infra/ et seed/ dans
+    # l'image) ; le Dockerfile reste rangé dans worker/.
+    # Ce qui entre dans le contexte : voir .dockerignore (liste blanche).
+    build:
+      context: .
+      dockerfile: worker/Dockerfile
+
+    # Mêmes paramètres de connexion que l'API (noms des services Docker).
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER:-talentgraph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-talentgraph}
+      POSTGRES_DB: ${POSTGRES_DB:-talentgraph}
+      ES_URL: http://elasticsearch:9200
+
+    # Même cache Hugging Face que l'API : le modèle (~470 Mo) est
+    # téléchargé UNE fois, par le loader, et l'API le retrouve déjà là.
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+
+    # Un travail qui se TERMINE : on ne le relance pas après sa fin
+    # (contrairement aux bases et à l'API, qui tournent en continu).
+    restart: "no"
+
+  # ---------------------------------------------------------------
   # API : notre serveur FastAPI (module M3)
   # Rôle : faire le lien entre l'interface web et les trois bases.
   # Image construite à partir de api/Dockerfile (notre code).
@@ -122,12 +164,13 @@ services:
     # Dans le réseau Docker, chaque base se joint par le NOM DE SON SERVICE,
     # sur son port INTERNE (5432 pour PostgreSQL, pas le 5433 de ton PC).
     # ${...} : valeurs lues dans le fichier .env (les secrets ne sont pas ici).
+    # ${X:-talentgraph} : valeur PAR DÉFAUT si .env est absent (voir postgres).
     environment:
       POSTGRES_HOST: postgres
       POSTGRES_PORT: "5432"
-      POSTGRES_USER: ${POSTGRES_USER}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
-      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER:-talentgraph}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-talentgraph}
+      POSTGRES_DB: ${POSTGRES_DB:-talentgraph}
       REDIS_HOST: redis
       ES_URL: http://elasticsearch:9200
 
@@ -152,6 +195,11 @@ services:
         condition: service_healthy
       elasticsearch:
         condition: service_healthy
+      # L'API démarre seulement quand le loader a TERMINÉ AVEC SUCCÈS
+      # (code de sortie 0) : quand le formulaire est accessible, les
+      # offres sont forcément dans les bases.
+      loader:
+        condition: service_completed_successfully
 
     # L'API est "healthy" si sa route /health répond 200.
     # Lancé DANS le conteneur : ici, localhost = le conteneur api lui-même.
