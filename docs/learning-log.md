@@ -117,3 +117,40 @@
 - Même score pour deux offres : analyseur `standard` (« développeuse » ≠ « développeur ») et critères BM25 identiques → mapping avec l'analyseur `french`.
 - Connexion refusée sur `localhost:9200` : Elasticsearch encore en démarrage (`health: starting`) → attendre `healthy`.
 - Verrou Git `.git/index.lock` laissé par une commande lancée depuis un environnement qui ne peut pas supprimer de fichiers → suppression manuelle du verrou.
+
+## M4 — Recherche hybride (novembre 2026)
+
+### Notions apprises
+- **Embeddings** : texte → vecteur de nombres ; textes de sens proche → vecteurs proches (cosinus). Chaîne : découpage en *tokens* → 12 couches transformer → moyenne → normalisation ; formats tenseur PyTorch → tableau NumPy → liste Python (`.tolist()`).
+- Rôles : Hugging Face (modèles), transformers (architecture), PyTorch (calculs), sentence-transformers (enchaînement, `encode`).
+- Limite de 512 tokens (vecteurs de position appris) : la fin d'un long texte est ignorée.
+- Différence modèle d'embeddings (chercher, 512 tokens) / LLM (raisonner, rédiger, ~200 000 tokens).
+- **`dense_vector`** et **HNSW** : graphe à plusieurs niveaux pour trouver les voisins sans tout comparer ; `m`, `ef_construction` ; quantification (`bbq_hnsw` par défaut dans Elasticsearch 9).
+- **kNN** : `k`, `num_candidates`, `filter` appliqué PENDANT la recherche.
+- **RRF** : fusionner des rangs plutôt que des scores ; constante k = 60.
+- Requête `bool` : `must` (obligatoire, compte dans le score), `filter` (obligatoire, oui/non), `should` (facultatif, ajoute des points ; seul, il signifie « au moins un »), `must_not` ; `exists`, `term`, `terms`, `range`, `match_phrase`, `constant_score`.
+- `term` sur un `keyword` = égalité exacte, caractère par caractère.
+- Agrégations pour diagnostiquer : `terms`, `missing`, `track_total_hits`.
+- FastAPI : route de test sans enregistrement, `response_model=list[...]`, `typing.get_args` pour lire un `Literal`.
+- Docker : index de paquets supplémentaire (`--extra-index-url`), volume de cache.
+
+### Journal des tests (CV data, métier « data engineer », alternance)
+| Test | Constat | Correction |
+|---|---|---|
+| Bretagne (1re version) | presque uniquement des offres sans région / contrat inconnu ; 3 alternances aux places 15-20 | diagnostic par agrégations : les « inconnu » sont 5 à 10 fois plus nombreux |
+| `"ile de france"` | aucune offre d'Île-de-France : `term` exact | régions en liste fermée (D23) |
+| Bonus dans BM25 | offre 180 : 1re en BM25, 13e au final | bonus après la fusion (D21) |
+| Bretagne, bonus forts | 2 alternances « Développeur » (hors data) en tête : aucune alternance data n'existe en Bretagne | accepté (option A) ; seuil de pertinence écarté (D21) |
+| Île-de-France | 6 alternances data sur 20 ; 14 absentes des candidats | 3e recherche parmi les offres exactes (D22) → 19 sur 20 |
+| Offre 2082 | titre « Java », description data / MLOps : 1re en kNN, absente de BM25 | aucune : illustre l'intérêt de la recherche par sens |
+
+### Problèmes rencontrés et solutions
+- `ModuleNotFoundError: sentence_transformers` : venv non activé → `..\.venv\Scripts\Activate.ps1`.
+- Installation de torch qui semble bloquée : extraction de plusieurs centaines de Mo, normal.
+- Elasticsearch `ReadTimeout`, PostgreSQL « server closed the connection » : Docker / WSL redémarrés après la mise en veille du PC ; PostgreSQL a récupéré seul via le WAL, sans perte → relancer quand tout est `healthy`.
+
+### À faire plus tard
+- Niveau d'expérience : des postes Senior / Lead remontent pour un profil étudiant (M5 : niveau extrait du CV).
+- Salaires : périodes mélangées (mensuel 1 200-1 700, journalier 400-520, horaire 95) → normaliser au chargement avant d'utiliser le filtre salaire.
+- `company: "Stage"` : nom d'entreprise mal lu par Adzuna sur certaines annonces.
+- « Data Engineer Junior » classé après des « Data Analyst » par le kNN : limite du modèle générique (M5, M6).

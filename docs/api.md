@@ -1,4 +1,4 @@
-# API TalentGraph — référence (M3)
+# API TalentGraph — référence (M3, M4)
 
 Ce document décrit l'API FastAPI (`api/`) : ses routes, ce qu'elle enregistre
 dans PostgreSQL et Redis, et le parcours complet d'une demande.
@@ -11,6 +11,8 @@ Documentation interactive (générée par FastAPI) : http://localhost:8000/docs
 | `GET` | `/health` | vérifie que l'API joint PostgreSQL, Redis et Elasticsearch | 200 tout va bien · 503 une base injoignable |
 | `POST` | `/api/searches` | enregistre le formulaire : candidat + demande | 201 créée · 422 données invalides |
 | `GET` | `/api/searches/{id}` | relit une demande (PostgreSQL) et son statut en direct (Redis) | 200 · 404 introuvable · 422 id non numérique |
+| `POST` | `/api/search/preview` | **teste** la recherche hybride, sans rien enregistrer (M4) | 200 · 422 · 503 Elasticsearch indisponible |
+| `GET` | `/api/regions` | liste des 19 régions acceptées (liste déroulante du formulaire, M4) | 200 |
 
 Convention REST : `/api/searches` désigne la **collection** des demandes
 (`POST` = ajouter un élément), `/api/searches/{id}` **un élément** (`GET` = le lire).
@@ -79,6 +81,35 @@ plutôt que dans PostgreSQL. La demande elle-même reste pour toujours dans Post
 - **Validation en deux couches** : Pydantic (`schemas.py`) refuse tôt avec un
   message clair (422) ; les contraintes `CHECK` de PostgreSQL restent le dernier
   rempart.
+
+## Champs du formulaire (M4)
+
+- `cv_text` **obligatoire** (50 à 20 000 caractères) ; `job_title` facultatif.
+- `region` : une des 19 valeurs de `GET /api/regions`, écrites exactement (ex. `Île-de-France`) ; sinon 422.
+- `contract_types` : `cdi`, `cdd`, `stage`, `alternance`, `freelance` (vide = tous).
+
+## Recherche hybride (M4) — `api/app/search.py`
+
+```
+critères du formulaire
+   │
+   ├── filtres SOUPLES : région choisie OU absente, contrat coché OU « inconnu », salaire OK OU absent
+   ├── filtres STRICTS : région choisie, contrat coché (si l'un des deux est choisi)
+   │
+   ├── 1.     par mots (BM25) : métier dans title^3 + description,
+   │          bonus expression exacte dans le titre ──────────────────► 100 offres (rank_bm25)
+   ├── 2.     par sens (kNN)  : vecteur de « métier. CV », filtres souples ─► 100 offres (rank_knn)
+   └── 2 bis. par sens (kNN)  : même vecteur, filtres STRICTS ─────────────► 100 offres (rank_exact)
+                    │
+       fusion RRF : score = Σ 1 / (60 + rang)
+                    │
+       bonus : région exacte +0,02, contrat correspondant +0,02
+                    │
+       20 meilleures offres
+```
+
+Chaque résultat contient `score`, `rank_bm25`, `rank_knn`, `rank_exact`
+(`null` = hors des 100 premières de cette recherche). Choix et tests : D19 à D24.
 
 ## Évolution prévue (M4/M5)
 
