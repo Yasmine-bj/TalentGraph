@@ -1,0 +1,27 @@
+# =============================================================================
+# .dockerignore (racine) — Ce que Docker a le droit d'envoyer au build
+#
+# Utilisé par l'image du LOADER, dont le contexte de build est la racine du
+# projet (pour pouvoir copier infra/ et seed/ dans l'image).
+# (L'API a son propre contexte, api/, et son propre api/.dockerignore.)
+#
+# LISTE BLANCHE : on IGNORE TOUT par défaut, puis on AUTORISE ("!") seulement
+# ce dont l'image a besoin. Avantages :
+#   - SÉCURITÉ : .env (mots de passe, clé Adzuna) ne peut JAMAIS entrer dans
+#     une image, même si on ajoute d'autres fichiers à la racine plus tard ;
+#   - VITESSE : .venv (plusieurs Go), .git, seed/offers_sample.json (21 Mo)
+#     ne sont pas envoyés à chaque construction.
+# =============================================================================
+
+# 1) Tout ignorer...
+*
+
+# 2) ...sauf ce que le Dockerfile du loader copie :
+!worker/
+!infra/elasticsearch/
+!seed/demo_offers.json
+
+# 3) Et même dans ces dossiers, jamais :
+**/__pycache__
+**/*.pyc
+**/.env
