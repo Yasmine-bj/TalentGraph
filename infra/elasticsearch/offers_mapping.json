@@ -1,0 +1,43 @@
+{
+  "settings": {
+    "number_of_shards": 1,
+    "number_of_replicas": 0   
+  },
+  "mappings": {
+    "dynamic": "strict",
+    "properties": {
+      "source":          { "type": "keyword" },
+      "source_id":       { "type": "keyword" },
+
+      "title":           { "type": "text", "analyzer": "french" },
+      "description":     { "type": "text", "analyzer": "french" },
+      "company": {
+        "type": "text",
+        "fields": {
+          "keyword": { "type": "keyword", "ignore_above": 256 }
+        }
+      },
+
+      "region":          { "type": "keyword" },
+      "department":      { "type": "keyword" },
+      "city":            { "type": "keyword" },
+      "location":        { "type": "geo_point" },
+      "location_label":  { "type": "keyword", "index": false, "doc_values": false },
+
+      "contract_types":  { "type": "keyword" },
+      "contract_source": { "type": "keyword" },
+      "contract_time":   { "type": "keyword" },
+
+      "category":        { "type": "keyword" },
+      "search_keywords": { "type": "keyword" },
+
+      "salary_min":      { "type": "float" },
+      "salary_max":      { "type": "float" },
+      "published_at":    { "type": "date" },
+
+      "url":             { "type": "keyword", "index": false, "doc_values": false },
+
+      "embedding":       { "type": "dense_vector", "dims": 384, "index": true, "similarity": "cosine" }
+    }
+  }
+}
