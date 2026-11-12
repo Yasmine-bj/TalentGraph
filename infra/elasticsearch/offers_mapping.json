@@ -35,7 +35,9 @@
       "salary_max":      { "type": "float" },
       "published_at":    { "type": "date" },
 
-      "url":             { "type": "keyword", "index": false, "doc_values": false }
+      "url":             { "type": "keyword", "index": false, "doc_values": false },
+
+      "embedding":       { "type": "dense_vector", "dims": 384, "index": true, "similarity": "cosine" }
     }
   }
 }

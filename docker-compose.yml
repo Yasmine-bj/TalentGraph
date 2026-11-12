@@ -131,6 +131,13 @@ services:
       REDIS_HOST: redis
       ES_URL: http://elasticsearch:9200
 
+    # Cache Hugging Face : le modèle d'embeddings (~470 Mo) est téléchargé au
+    # PREMIER usage dans ce dossier. Grâce au volume, il est gardé quand le
+    # conteneur est recréé (docker compose up --build) : pas de nouveau
+    # téléchargement à chaque fois.
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+
     # port_du_PC:port_du_conteneur -> http://localhost:8000 depuis ton navigateur.
     ports:
       - "8000:8000"
@@ -162,3 +169,4 @@ volumes:
   pg_data:
   redis_data:   # journal AOF de Redis
   es_data:      # index Elasticsearch
+  hf_cache:     # modèle d'embeddings téléchargé par l'API (M4)

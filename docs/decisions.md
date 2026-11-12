@@ -174,3 +174,57 @@ Chaque décision technique importante : ce qui a été choisi, pourquoi, et les 
   - `refresh` puis `_count` pour vérifier : 7 298 / 7 298 documents.
 - Connexion par `ES_URL` (par défaut `http://localhost:9200` ; `http://elasticsearch:9200` dans un conteneur).
 - Prévu : ajout du champ vecteur `dense_vector` pour la recherche par le sens (ajouter un champ est permis ; changer un type impose de réindexer).
+
+## D18 — Pas de comptes utilisateurs en V1 (M3)
+- Décision : le candidat est identifié par son **email** (unique, en minuscules) ; même email = même personne, fiche mise à jour par UPSERT.
+- Pourquoi : délai du rendu (13/11) ; l'essentiel du projet est la persistance multi-bases et la recherche.
+- Limite connue : toute personne connaissant un identifiant de demande peut la lire.
+- Prévu après le rendu : vrais comptes (mots de passe hachés, JWT).
+
+## D19 — Modèle d'embeddings : `intfloat/multilingual-e5-small` (M4)
+- Décision : un modèle Hugging Face exécuté avec sentence-transformers, sur CPU, dans le worker (offres) ET dans l'API (CV).
+- Pourquoi : multilingue (offres en français, parfois en anglais), entraîné pour la recherche, petit (384 dimensions, ~470 Mo), rapide sans carte graphique.
+- Règles : préfixes `passage:` (offres) et `query:` (CV, recherche) ; vecteurs normalisés (cosinus) ; **même modèle des deux côtés** (`embeddings.py` en deux copies identiques), sinon les vecteurs ne sont pas comparables.
+- Limite : le modèle ne lit que 512 tokens (~350-400 mots) → le titre (offres) et le métier (CV) sont placés EN TÊTE du texte.
+- Image de l'API : torch « CPU seulement » (index PyTorch CPU, ~200 Mo au lieu de plusieurs Go) ; volume `hf_cache` pour ne télécharger le modèle qu'une fois.
+- Prévu (M6) : fine-tuning sur des paires CV ↔ offre.
+
+## D20 — Recherche hybride avec fusion RRF calculée en Python (M4, `api/app/search.py`)
+- Décision : deux recherches (par mots BM25 sur le métier, par sens kNN sur « métier. CV »), fusionnées par **Reciprocal Rank Fusion** : score = somme de 1 / (60 + rang).
+- Pourquoi RRF : les scores BM25 (ex. 12,7) et cosinus (ex. 0,86) ne sont pas sur la même échelle ; RRF fusionne des **rangs**. Une offre bien classée par les deux méthodes passe devant.
+- Pourquoi en Python : chaque résultat garde ses rangs (`rank_bm25`, `rank_knn`, `rank_exact`) pour comprendre le classement, et les bonus s'ajoutent après la fusion (D21).
+- BM25 : `title^3` + `description`, bonus `match_phrase` dans le titre ; seulement si le métier est rempli. Au M5, il utilisera les compétences extraites du CV.
+- 100 candidats par recherche (`num_candidates` 300) avant fusion, 20 résultats.
+
+## D21 — Filtres souples et bonus APRÈS la fusion, plutôt qu'un filtrage strict (M4)
+- Décision : on élimine une offre seulement si elle **contredit** un critère (autre région, autre contrat, salaire trop bas) ; une information **manquante** (région absente, contrat « inconnu », salaire absent) ne l'élimine pas. Les offres qui respectent **explicitement** les critères reçoivent un bonus sur le score final : région +0,02, contrat +0,02.
+- Pourquoi :
+  - un filtrage strict donnait souvent 0 résultat (ex. aucune alternance data en Bretagne) et perdait les 33 % d'offres au contrat inconnu ;
+  - avec les bonus, les offres sûres passent quand même en tête (0,02 > 1/61, une 1re place).
+- Pourquoi après la fusion : dans BM25, le bonus était dilué (le kNN n'en avait pas, RRF ne garde que les rangs) ; constaté sur l'offre 180 : 1re en BM25, 13e au final.
+- Bonus contrat unique, quelle que soit `contract_source` : la source la plus fiable a déjà été choisie au chargement (D8).
+- Alternative écartée : seuil de pertinence pour le bonus (rang ≤ 50) : aurait retiré le bonus aux meilleures alternances (« Data Engineer Junior - Alternance » : 57e en BM25).
+- Prévu (M7) : champ `match` pour afficher « correspond à vos critères » / « à vérifier ».
+
+## D22 — Troisième recherche « par sens parmi les offres exactes » (M4)
+- Constat : Île-de-France + alternance : 20 alternances « data » dans l'index, 6 dans les résultats ; les 14 autres n'étaient dans aucune des deux listes de 100 candidats (les annonces d'alternance, centrées sur l'école et le rythme, ressemblent moins à « data engineer » que les postes Senior).
+- Décision : si une région ou un contrat est choisi, une recherche kNN de plus, avec des filtres **stricts** (région exacte, contrat exact) ; ajoutée à la fusion RRF (`rank_exact`).
+- Résultat : 19 alternances sur 20, l'offre idéale (« Data Engineer - en alternance ») 1re.
+- Le vecteur du CV est calculé une seule fois pour les deux recherches kNN.
+
+## D23 — Régions en liste fermée (M4)
+- Constat : `"ile de france"` ne trouvait rien (le filtre `term` compare caractère par caractère, l'index contient `Île-de-France`) ; seules les offres sans région restaient, sans erreur.
+- Décision : `Region = Literal[...]` dans `schemas.py`, les 19 valeurs de l'index (vérifiées par agrégation) ; valeur inconnue → 422. Route `GET /api/regions` pour la liste déroulante du formulaire : la liste n'est écrite qu'à un endroit.
+- Lien avec D15 : `normalize_region` harmonise les variantes au téléchargement ; une région VRAIMENT nouvelle devra être ajoutée à `OFFICIAL_REGIONS` (worker) et à `Region` (API).
+
+## D24 — CV obligatoire, métier facultatif (M4)
+- Décision : `cv_text` obligatoire (50 à 20 000 caractères) ; `job_title` facultatif.
+- Pourquoi : les quatre modes partent du CV ; la recherche par sens fonctionne toujours avec le CV seul ; le métier, s'il est donné, active la recherche par mots et passe en tête du texte du kNN.
+
+## D25 — Traitement en arrière-plan avec `BackgroundTasks` (M4)
+- Décision : `POST /api/searches` enregistre la demande, répond `201 pending`, puis FastAPI exécute `run_search` après l'envoi de la réponse ; la page suit l'avancement par polling (`GET /api/searches/{id}`, statut en direct dans Redis).
+- Pourquoi : la recherche prend ~1 s aujourd'hui, mais 10 à 30 s au M5 (agents IA) : le navigateur ne doit pas rester bloqué.
+- `run_search` reçoit le formulaire déjà validé (même programme) : pas de relecture de la base.
+- Limite acceptée : la tâche vit en mémoire dans le conteneur `api` ; un redémarrage pendant le traitement la perd (demande bloquée en `running`).
+- Alternative pour la production : une file de tâches (liste Redis + conteneur `worker`) ; le worker ne recevrait que l'identifiant et relirait PostgreSQL.
+- Polling plutôt que WebSocket / Server-Sent Events : plus simple, suffisant ici.

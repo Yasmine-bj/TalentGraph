@@ -56,6 +56,9 @@ from psycopg.rows import dict_row                 # lignes PostgreSQL sous forme
 #  "if __name__ == '__main__'".)
 from load_offers import connect
 
+# Le modèle d'embeddings (voir embeddings.py) : transforme un texte en vecteur de sens.
+from embeddings import EMBEDDING_DIMS, embed_passages
+
 # ---------------------------------------------------------------------------
 # CONSTANTES
 # ---------------------------------------------------------------------------
@@ -161,6 +164,19 @@ def recreate_index(es: Elasticsearch) -> None:
 # 4. TRANSFORMATION : ligne PostgreSQL -> document Elasticsearch
 # ---------------------------------------------------------------------------
 
+def offer_text(row: dict) -> str:
+    """Texte d'une offre utilisé pour son embedding : titre + description.
+
+    Le titre seul est trop court ("Data Engineer F/H") ; la description apporte
+    les technologies et le contexte. ~500 caractères au total, bien en dessous
+    de la limite du modèle (512 tokens) : tout le texte est lu.
+    Le préfixe "passage: " est ajouté par embed_passages(), pas ici.
+    Isolé dans une fonction : un seul endroit à modifier si on veut un jour
+    y ajouter l'entreprise ou la ville.
+    """
+    return f"{row['title']}. {row['description']}"
+
+
 def row_to_document(row: dict) -> dict:
     """Transforme une ligne de la table offers en document pour l'index offers.
 
@@ -208,7 +224,7 @@ def row_to_document(row: dict) -> dict:
     return {key: value for key, value in document.items() if value is not None}
 
 
-def build_actions(rows: list[dict]):
+def build_actions(rows: list[dict], vectors: list[list[float]]):
     """Produit les "actions" à envoyer à l'API _bulk, une par offre.
 
     Une action dit à Elasticsearch : "range CE document, dans CET index,
@@ -221,12 +237,20 @@ def build_actions(rows: list[dict]):
     "yield" fait de cette fonction un GÉNÉRATEUR : elle produit les actions
     UNE PAR UNE, au fur et à mesure que helpers.bulk les demande, au lieu de
     construire d'abord une liste de 7 300 actions en mémoire.
+
+    vectors : les embeddings, DANS LE MÊME ORDRE que rows (vectors[i] est le
+    vecteur de rows[i]). zip(rows, vectors) parcourt les deux listes ENSEMBLE,
+    élément par élément, comme une fermeture éclair :
+        (offre 1, vecteur 1), (offre 2, vecteur 2), ...
     """
-    for row in rows:
+    for row, vector in zip(rows, vectors):
+        document = row_to_document(row)
+        # Champ dense_vector du mapping : 384 nombres, le sens de l'offre.
+        document["embedding"] = vector
         yield {
             "_index": INDEX_NAME,
             "_id": row["id"],
-            "_source": row_to_document(row),
+            "_source": document,
         }
     
     """Une action dit à Elasticsearch : « range ce document (_source), dans cet index (_index),
@@ -241,6 +265,15 @@ def main() -> None:
     """Reconstruit l'index offers à partir de PostgreSQL."""
     es = connect_es()
     rows = read_offers()
+
+    # Embeddings de toutes les offres, en une fois (par lots de 64, avec une
+    # barre de progression). C'est le plus long du script : quelques minutes
+    # sur CPU. On les calcule AVANT de recréer l'index : si le calcul échoue
+    # (mémoire, modèle introuvable...), l'ancien index reste intact au lieu
+    # d'être supprimé pour rien.
+    print(f"Calcul des embeddings ({EMBEDDING_DIMS} dimensions) de {len(rows)} offres...")
+    vectors = embed_passages([offer_text(row) for row in rows])
+
     recreate_index(es)
 
     # helpers.bulk : envoie les actions par paquets de BULK_CHUNK_SIZE à l'API
@@ -251,7 +284,7 @@ def main() -> None:
     # Renvoie un tuple (nombre de succès, liste des erreurs) : on le "déballe".
     success, errors = helpers.bulk(
         es,
-        build_actions(rows),
+        build_actions(rows, vectors),
         chunk_size=BULK_CHUNK_SIZE,
         raise_on_error=False,
     )
