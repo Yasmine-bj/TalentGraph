@@ -1,13 +1,25 @@
 <!doctype html>
-<html lang="en">
+<!-- index.html : la SEULE page HTML de l'application (SPA).
+     React viendra remplir la <div id="root"> ; tout le reste est dessiné en JavaScript. -->
+<html lang="fr">
   <head>
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <!-- Indispensable pour un affichage correct sur mobile -->
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <title>TalentGraph — Trouvez les offres faites pour vous</title>
+
+    <!-- Polices Google : Space Grotesk pour les titres, Inter pour le texte -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap"
+      rel="stylesheet"
+    />
   </head>
   <body>
     <div id="root"></div>
+    <!-- Point d'entrée JavaScript : Vite part de ce fichier pour construire l'appli -->
     <script type="module" src="/src/main.jsx"></script>
   </body>
 </html>
