@@ -9,6 +9,7 @@ import { Link } from 'react-router'
 import { Badge, Box, Button, Container, Group, SimpleGrid, Stack, Text, Title } from '@mantine/core'
 
 import { ArrowRightIcon, ChartIcon, CheckIcon, DocumentCheckIcon, MailIcon, TargetIcon } from '../components/Icons.jsx'
+import ScoreRing from '../components/ScoreRing.jsx' // M7 étape 7 : déplacé dans son propre fichier
 import { COLORS } from '../theme.js'
 
 // clamp(min, idéal, max) : taille de police qui s'adapte à la largeur de l'écran
@@ -164,25 +165,6 @@ function OfferPreview() {
           ))}
         </Stack>
       </Stack>
-    </Box>
-  )
-}
-
-// Petit anneau de pourcentage. conic-gradient = dégradé "en camembert" :
-// violet de 0 à percent %, gris clair pour le reste. Un disque blanc au centre
-// cache le milieu pour ne laisser qu'un anneau. (On le réutilisera sur la page résultats.)
-function ScoreRing({ percent }) {
-  return (
-    <Box w={64} h={64} style={{
-      flexShrink: 0, borderRadius: '50%',
-      background: `conic-gradient(#5B3DF5 0 ${percent}%, #ECE9FB ${percent}% 100%)`,
-      display: 'flex', alignItems: 'center', justifyContent: 'center',
-    }}>
-      <Box w={50} h={50} bg="white" fw={700} fz={15} style={{
-        borderRadius: '50%', display: 'flex', alignItems: 'center', justifyContent: 'center',
-      }}>
-        {percent}%
-      </Box>
     </Box>
   )
 }
