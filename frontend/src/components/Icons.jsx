@@ -61,3 +61,7 @@ export const MailIcon = (props) => (
 export const SearchIcon = (props) => (
   <Icon {...props}><circle cx="11" cy="11" r="7" /><path d="m20 20-4-4" /></Icon>
 )
+
+export const UploadIcon = (props) => (
+  <Icon {...props}><path d="M12 16V4" /><path d="m6 10 6-6 6 6" /><path d="M4 20h16" /></Icon>
+)

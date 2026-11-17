@@ -18,6 +18,7 @@ import {
 } from '@mantine/core'
 
 import { createSearch, getRegions } from '../api.js'
+import { UploadIcon } from '../components/Icons.jsx'
 import { COLORS } from '../theme.js'
 
 // ---------------------------------------------------------------------------
@@ -60,6 +61,20 @@ const EMPTY_FORM = {
   region: null,        // null = "Toute la France"
   contract_types: [],  // [] = tous les contrats
   salary_min: '',
+}
+
+// Profil FICTIF pour les démonstrations (bouton "Remplir avec un exemple").
+// Le formulaire reste VIDE par défaut : un vrai visiteur n'a rien à effacer.
+const EXAMPLE_PROFILE = {
+  full_name: 'Léa Martin',
+  email: 'lea.martin@example.com',
+  cv_text:
+    "Étudiante en 1re année d'école d'ingénieurs (informatique), spécialité data et intelligence artificielle. " +
+    'Recherche une alternance en data engineering. ' +
+    'Compétences : Python, SQL, PostgreSQL, Pandas, Spark, Airflow, Docker, Git, notions de cloud (AWS). ' +
+    'Projets : pipeline de données (ingestion d\'une API, nettoyage, chargement dans PostgreSQL), ' +
+    'tableau de bord de suivi, application web avec FastAPI et React. ' +
+    'Langues : français, anglais (B2).',
 }
 
 // ---------------------------------------------------------------------------
@@ -142,11 +157,42 @@ function StepHeader({ title, subtitle }) {
 //   errors   : les messages d'erreur à afficher sous les champs
 // ---------------------------------------------------------------------------
 
-function StepProfile({ form, setField, errors }) {
+// Bloc "Importez votre CV" de la maquette. Désactivé pour l'instant : la lecture
+// des fichiers PDF / Word demande une route d'API dédiée (prévue au M3c).
+function CvImportBlock() {
+  return (
+    <Group justify="space-between" gap={16} p={22} bg="#F4F1FF"
+      style={{ borderRadius: 20, border: '2px dashed #C9BFFB' }}>
+      <Group gap={16} wrap="nowrap">
+        <Box w={52} h={52} bg="violet.6" c="white" style={{
+          borderRadius: 14, flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center',
+        }}>
+          <UploadIcon size={24} />
+        </Box>
+        <div>
+          <Group gap={8}>
+            <Text fw={700}>Importez votre CV</Text>
+            <Badge color="coral" variant="light" radius="xl" tt="none">Bientôt</Badge>
+          </Group>
+          <Text size="sm" c={COLORS.muted}>PDF ou Word · le texte sera extrait automatiquement</Text>
+        </div>
+      </Group>
+      <Button variant="outline" radius="xl" size="md" disabled>Choisir un fichier</Button>
+    </Group>
+  )
+}
+
+function StepProfile({ form, setField, errors, onFillExample }) {
   const cvLength = form.cv_text.trim().length
   return (
     <Stack gap={24}>
-      <StepHeader title="Parlez-nous de vous" subtitle="Votre CV est la base de la recherche. Rien n'est publié." />
+      <Group justify="space-between" align="flex-start" gap={12}>
+        <StepHeader title="Parlez-nous de vous" subtitle="Votre CV est la base de la recherche. Rien n'est publié." />
+        {/* Pour les démos : remplit l'étape avec le profil fictif EXAMPLE_PROFILE */}
+        <Button variant="light" radius="xl" size="sm" onClick={onFillExample}>
+          Remplir avec un exemple
+        </Button>
+      </Group>
 
       <SimpleGrid cols={{ base: 1, sm: 2 }} spacing={16}>
         {/* Champ "contrôlé" : value vient de l'état, onChange met l'état à jour.
@@ -171,8 +217,10 @@ function StepProfile({ form, setField, errors }) {
         />
       </SimpleGrid>
 
+      <CvImportBlock />
+
       <Textarea
-        label="Collez le texte de votre CV"
+        label="…ou collez le texte de votre CV"
         description="Compétences, formations, expériences… Plus il est complet, meilleurs sont les résultats."
         placeholder="Étudiante en école d'ingénieurs, spécialité data. Compétences : Python, SQL, Spark…"
         size="md"
@@ -349,6 +397,12 @@ export default function SearchPage() {
     setErrors((previous) => ({ ...previous, [name]: undefined })) // on efface l'erreur du champ corrigé
   }
 
+  // Remplit nom, email et CV avec le profil fictif, et efface les erreurs affichées.
+  function fillExample() {
+    setForm((previous) => ({ ...previous, ...EXAMPLE_PROFILE }))
+    setErrors({})
+  }
+
   function goNext() {
     const stepErrors = validateStep(step, form)
     setErrors(stepErrors)
@@ -385,7 +439,7 @@ export default function SearchPage() {
           <Stack gap={28}>
             {/* Affichage conditionnel : "condition && <Composant />" n'affiche
                 le composant QUE si la condition est vraie. */}
-            {step === 1 && <StepProfile form={form} setField={setField} errors={errors} />}
+            {step === 1 && <StepProfile form={form} setField={setField} errors={errors} onFillExample={fillExample} />}
             {step === 2 && <StepGoal form={form} setField={setField} />}
             {step === 3 && <StepCriteria form={form} setField={setField} regions={regions} />}
             {step === 4 && <StepSummary form={form} />}

@@ -1,6 +1,6 @@
 // src/components/Navbar.jsx — barre du haut : logo à gauche, liens + bouton à droite.
 import { Link } from 'react-router'
-import { Group, Box, Text, Button, Container, Anchor } from '@mantine/core'
+import { Group, Box, Text, Button, Container, Anchor, Popover } from '@mantine/core'
 
 export default function Navbar() {
   return (
@@ -45,6 +45,23 @@ export default function Navbar() {
           <Anchor href="/#comment" c="inherit" fw={500} underline="never" visibleFrom="sm">
             Comment ça marche
           </Anchor>
+
+          {/* "Se connecter" : les comptes ne sont pas encore codés (prévu après le M7).
+              Popover = petite bulle qui s'ouvre au clic, sous le bouton, pour le dire
+              clairement : un bouton qui ne réagit pas du tout paraîtrait cassé. */}
+          <Popover width={240} position="bottom-end" shadow="md" radius="lg" withArrow>
+            <Popover.Target>
+              <Button variant="subtle" color="#1B1640" fw={500} size="md" px={8}>
+                Se connecter
+              </Button>
+            </Popover.Target>
+            <Popover.Dropdown>
+              <Text fw={700} size="sm">Bientôt disponible</Text>
+              <Text size="sm" c="dimmed">
+                Les comptes arrivent bientôt. En attendant, la recherche est libre, sans inscription.
+              </Text>
+            </Popover.Dropdown>
+          </Popover>
 
           {/* component={Link} : un bouton Mantine qui se comporte comme un lien du routeur.
               color="#1B1640" ("ink") : bouton foncé comme sur la maquette. */}
