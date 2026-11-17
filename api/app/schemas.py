@@ -159,6 +159,21 @@ class SearchQuery(BaseModel):
 # CE QUE L'API RENVOIE
 # ---------------------------------------------------------------------------
 
+class ScoreDetails(BaseModel):
+    """D'où vient le score d'une offre (M7) : les points de chaque partie.
+
+    score = keywords + profile + criteria + bonus_region + bonus_contract
+    Une recherche où l'offre est 1re rapporte 1/61 = 0,0164 ; 0 = l'offre
+    n'est pas dans ses 100 premiers résultats (ou la recherche n'a pas été
+    faite). Le frontend s'en sert pour "Pourquoi cette offre ?".
+    """
+    keywords: float = 0.0        # recherche par MOTS (BM25)
+    profile: float = 0.0         # recherche par SENS (kNN)
+    criteria: float = 0.0        # recherche par SENS parmi les offres exactes
+    bonus_region: float = 0.0    # +0,02 si la région de l'offre = région choisie
+    bonus_contract: float = 0.0  # +0,02 si un contrat de l'offre est coché
+
+
 class OfferResult(BaseModel):
     """Une offre trouvée par la recherche hybride.
 
@@ -193,6 +208,10 @@ class OfferResult(BaseModel):
     rank_bm25: int | None = None
     rank_knn: int | None = None
     rank_exact: int | None = None   # ajout M4, après tests (3e recherche)
+    # M7 : pour l'affichage. "| None = None" : les recherches enregistrées
+    # AVANT le M7 n'ont pas ces champs, elles restent lisibles.
+    score_details: ScoreDetails | None = None
+    match_percent: int | None = None  # 0 à 100, voir search.add_match_percent
 
 class SearchCreated(BaseModel):
     """Réponse immédiate à POST /api/searches : la demande est enregistrée."""
