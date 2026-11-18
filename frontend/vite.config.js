@@ -1,27 +1,16 @@
-// =============================================================================
-// vite.config.js — Configuration de Vite (l'outil de construction du frontend)
-//
-// Vite a deux rôles :
-//   - npm run dev   : serveur de DÉVELOPPEMENT (http://localhost:5173), qui
-//                     traduit le JSX à la volée et recharge la page à chaque
-//                     sauvegarde ;
-//   - npm run build : construit les fichiers de PRODUCTION (dossier dist/),
-//                     servis ensuite par nginx dans le conteneur frontend.
-// =============================================================================
-
-import react from '@vitejs/plugin-react'
+// vite.config.js — configuration de Vite (le serveur de développement + l'outil de build)
 import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
 
 export default defineConfig({
-  // Plugin React : traduit le JSX (<Composant />) en JavaScript normal.
+  // Le plugin React permet à Vite de comprendre le JSX et active le rechargement à chaud.
   plugins: [react()],
 
   server: {
-    // PROXY (développement seulement) : les appels de la page vers /api/...
-    // sont TRANSMIS à notre API, qui tourne dans Docker sur le port 8000.
-    //   navigateur -> localhost:5173/api/searches -> localhost:8000/api/searches
-    // Pour le navigateur, la page et l'API ont la MÊME adresse : pas de
-    // blocage CORS. En production, c'est nginx qui joue ce rôle (nginx.conf).
+    // Proxy de développement : quand le navigateur appelle /api/... sur localhost:5173,
+    // Vite transmet la requête à l'API FastAPI sur localhost:8000.
+    // Le navigateur croit parler à une seule origine → pas de problème de CORS.
+    // (En production, c'est nginx qui jouera ce rôle.)
     proxy: {
       '/api': 'http://localhost:8000',
     },

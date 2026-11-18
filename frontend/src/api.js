@@ -1,84 +1,90 @@
-// =============================================================================
-// api.js — Les appels à l'API TalentGraph (FastAPI)
+// src/api.js — le SEUL fichier du frontend qui parle à l'API FastAPI.
 //
-// Tous les échanges avec le serveur passent par ce fichier : les composants
-// appellent getRegions(), createSearch(), getSearch() sans se soucier de HTTP.
+// Pourquoi un fichier à part ?
+//   Les pages n'ont pas à savoir COMMENT on parle au serveur (URL, méthode HTTP,
+//   en-têtes, gestion d'erreurs). Elles appellent juste createSearch(...) ou
+//   getSearch(id). Si une route change un jour, on ne modifie QUE ce fichier.
 //
-// Les adresses commencent par /api : la page et l'API ont la MÊME origine.
-//   - en développement, Vite transmet /api à localhost:8000 (vite.config.js) ;
-//   - en production, nginx transmet /api au conteneur api (nginx.conf).
-// =============================================================================
+// Les URL commencent par /api : en développement, le proxy de Vite les envoie
+// vers localhost:8000 ; en production, ce sera nginx (voir vite.config.js).
 
-// Noms lisibles des champs, pour les messages d'erreur de validation (422).
-const FIELD_LABELS = {
-  full_name: 'Nom',
-  email: 'Email',
-  cv_text: 'CV',
-  mode: 'Mode',
-  job_title: 'Métier',
-  region: 'Région',
-  contract_types: 'Contrats',
-  salary_min: 'Salaire minimum',
-}
+const BASE_URL = '/api'
 
-// Erreur renvoyée par l'API, avec son code HTTP (404, 422, 503...).
+// Erreur "enrichie" : en plus du message, on garde le code HTTP (404, 422, 503…)
+// pour que la page puisse réagir différemment selon le cas.
 export class ApiError extends Error {
-  constructor(status, message) {
+  constructor(message, status) {
     super(message)
+    this.name = 'ApiError'
     this.status = status
   }
 }
 
-// Transforme le "detail" d'une erreur FastAPI en message lisible.
-//   422 : detail = [{loc: ["body", "cv_text"], msg: "..."}, ...]
-//   autres : detail = "texte"
-function formatDetail(detail) {
+// Transforme le "detail" renvoyé par FastAPI en une phrase lisible.
+//   - erreur 422 (validation Pydantic) : detail est une LISTE
+//     ex. [{ loc: ['body', 'cv_text'], msg: 'String should have at least 50 characters' }]
+//   - nos HTTPException (404, 503) : detail est une simple CHAÎNE
+function readErrorDetail(detail) {
   if (Array.isArray(detail)) {
     return detail
-      .map((d) => {
-        const field = d.loc?.[d.loc.length - 1]
-        return `${FIELD_LABELS[field] ?? field} : ${d.msg}`
-      })
+      .map((err) => `${err.loc?.at(-1) ?? 'champ'} : ${err.msg}`) // at(-1) = dernier élément = nom du champ
       .join(' · ')
   }
-  return detail ?? 'Erreur inattendue du serveur.'
+  return typeof detail === 'string' ? detail : null
 }
 
-// Envoie une requête et renvoie le JSON de la réponse.
-// fetch : la fonction du navigateur pour faire une requête HTTP.
-// Si le code HTTP n'est pas 2xx (res.ok faux), on lève une ApiError.
+// Fonction interne commune à tous les appels.
+//   path    : la fin de l'URL, ex. '/searches/42'
+//   options : les options de fetch (méthode, corps…)
 async function request(path, options = {}) {
-  let res
+  let response
   try {
-    res = await fetch(path, {
-      headers: { 'Content-Type': 'application/json' },
+    // fetch() est la fonction du navigateur pour faire une requête HTTP.
+    // Elle renvoie une PROMESSE : "await" attend la réponse sans bloquer la page.
+    response = await fetch(`${BASE_URL}${path}`, {
+      headers: { 'Content-Type': 'application/json' }, // on envoie / reçoit du JSON
       ...options,
     })
   } catch {
-    // Pas de réponse du tout (serveur arrêté, réseau coupé).
-    throw new ApiError(0, "Impossible de joindre l'API. Les conteneurs sont-ils démarrés ?")
+    // fetch n'échoue (throw) QUE si le serveur est injoignable (API éteinte, réseau coupé).
+    throw new ApiError("Impossible de joindre le serveur. L'API est-elle démarrée ?", 0)
   }
-  const data = await res.json().catch(() => null)
-  if (!res.ok) {
-    throw new ApiError(res.status, formatDetail(data?.detail))
+
+  // On essaie de lire le corps en JSON (il peut être vide ou ne pas être du JSON).
+  const data = await response.json().catch(() => null)
+
+  // response.ok = true pour les codes 200 à 299. Sinon c'est une erreur HTTP :
+  // contrairement à ce que beaucoup croient, fetch ne "throw" PAS sur un 404 ou 500 :
+  // c'est à nous de le vérifier.
+  if (!response.ok) {
+    const message = readErrorDetail(data?.detail) ?? `Erreur ${response.status}`
+    throw new ApiError(message, response.status)
   }
   return data
 }
 
-// GET /api/regions -> ["Auvergne-Rhône-Alpes", ...] (liste déroulante)
-export function getRegions() {
-  return request('/api/regions')
-}
+// ---------------------------------------------------------------------------
+// Les fonctions utilisées par les pages
+// ---------------------------------------------------------------------------
 
-// POST /api/searches -> {id, candidate_id, status: "pending"}
+// POST /api/searches — enregistre la demande (PostgreSQL + Redis) et lance la recherche.
+// payload : { full_name, email, cv_text, mode, job_title, region, contract_types, salary_min }
+// Réponse (201) : { id, candidate_id, status: 'pending' }
 export function createSearch(payload) {
-  return request('/api/searches', {
+  return request('/searches', {
     method: 'POST',
-    body: JSON.stringify(payload),
+    body: JSON.stringify(payload), // objet JS → texte JSON
   })
 }
 
-// GET /api/searches/{id} -> la demande complète (statut, résultats...)
+// GET /api/searches/{id} — état de la demande, et ses résultats quand status = 'done'.
+// Réponse : { id, status, results: { offers: [...] } | null, error_message, ... }
 export function getSearch(id) {
-  return request(`/api/searches/${id}`)
+  return request(`/searches/${id}`)
+}
+
+// GET /api/regions — la liste officielle des régions (pour la liste déroulante).
+// Réponse : ['Auvergne-Rhône-Alpes', 'Bourgogne-Franche-Comté', ...]
+export function getRegions() {
+  return request('/regions')
 }
