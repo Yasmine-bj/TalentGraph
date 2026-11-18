@@ -1,0 +1,9 @@
+# frontend/.dockerignore — ce qui n'est PAS envoyé à Docker lors du build.
+# node_modules : réinstallé DANS l'image par "npm ci" (et celui du PC est pour
+#                Windows : certains paquets contiennent des binaires propres au système).
+# dist         : reconstruit dans l'image par "npm run build".
+node_modules
+dist
+npm-debug.log*
+.env*
+.vscode

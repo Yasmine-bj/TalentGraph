@@ -213,6 +213,28 @@ services:
 
     restart: unless-stopped
 
+  # ---------------------------------------------------------------
+  # Frontend : l'interface web React (module M7)
+  # Image en deux étapes (frontend/Dockerfile) : Node construit les
+  # fichiers statiques, nginx les sert et transmet /api/ au service api.
+  # C'est LA porte d'entrée du correcteur : http://localhost:3000
+  # ---------------------------------------------------------------
+  frontend:
+    build: ./frontend
+
+    # port_du_PC:port_du_conteneur -> http://localhost:3000
+    # (nginx écoute sur 80 DANS le conteneur)
+    ports:
+      - "3000:80"
+
+    # nginx a besoin que le nom "api" existe au démarrage (proxy_pass) :
+    # on attend que l'API soit healthy, donc que tout le reste soit prêt.
+    depends_on:
+      api:
+        condition: service_healthy
+
+    restart: unless-stopped
+
 volumes:
   pg_data:
   redis_data:   # journal AOF de Redis
