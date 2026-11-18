@@ -1,40 +1,24 @@
-// =============================================================================
-// main.jsx — Point d'entrée de l'application React
-//
-// 1. Importe les styles de Mantine (UNE fois, pour toute l'application).
-// 2. Définit le THÈME : couleurs, arrondis, police, partagés par tous les
-//    composants -> une interface cohérente.
-// 3. "Branche" React dans <div id="root"> (index.html) et y dessine <App />,
-//    entouré de <MantineProvider>, qui donne le thème à tous les composants.
-// =============================================================================
-
+// src/main.jsx — point d'entrée : on "monte" React dans la <div id="root"> d'index.html.
 import { StrictMode } from 'react'
 import { createRoot } from 'react-dom/client'
-import { MantineProvider, createTheme } from '@mantine/core'
+import { BrowserRouter } from 'react-router'
+import { MantineProvider } from '@mantine/core'
 
-// Feuille de style de Mantine : sans elle, les composants n'ont aucun style.
+// Feuille de style de base de Mantine : OBLIGATOIRE, sinon les composants s'affichent "nus".
 import '@mantine/core/styles.css'
-// Nos quelques styles globaux (fond de page, survol des cartes...).
-import './styles.css'
 
+import { theme } from './theme.js'
 import App from './App.jsx'
 
-// Le thème de TalentGraph : modifier une valeur ici change TOUTE l'interface.
-const theme = createTheme({
-  primaryColor: 'indigo',     // couleur principale (boutons, liens, sélection)
-  defaultRadius: 'md',        // coins arrondis moyens partout
-  fontFamily:
-    'Inter, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif',
-  headings: { fontWeight: '700' },
-})
-
-// createRoot(...).render(...) : React prend le contrôle de <div id="root">.
-// StrictMode : mode de vérification (développement seulement) qui signale
-// les erreurs courantes ; sans effet en production.
 createRoot(document.getElementById('root')).render(
+  // StrictMode : en développement seulement, React vérifie certaines erreurs courantes.
   <StrictMode>
-    <MantineProvider theme={theme} defaultColorScheme="light">
-      <App />
+    {/* MantineProvider rend le thème accessible à TOUS les composants en dessous. */}
+    <MantineProvider theme={theme}>
+      {/* BrowserRouter lit l'URL du navigateur (/, /recherche…) pour savoir quelle page afficher. */}
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
     </MantineProvider>
   </StrictMode>,
 )

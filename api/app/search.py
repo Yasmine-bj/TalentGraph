@@ -117,6 +117,12 @@ RESULT_FIELDS = [
     "salary_min", "salary_max", "published_at", "url",
 ]
 
+# DÉTAIL DU SCORE (M7) : nom "lisible" de chaque recherche dans score_details.
+# Le frontend s'en sert pour expliquer le classement ("Pourquoi cette offre ?") :
+#   keywords = recherche par MOTS (BM25), profile = par SENS (kNN),
+#   criteria = par SENS parmi les offres EXACTES (2 bis).
+SCORE_PARTS = {"rank_bm25": "keywords", "rank_knn": "profile", "rank_exact": "criteria"}
+
 
 # ---------------------------------------------------------------------------
 # 1. LES FILTRES (souples pour les recherches 1 et 2, stricts pour la 2 bis)
@@ -312,9 +318,17 @@ def rrf_fuse(rankings: dict[str, list[dict]]) -> list[dict]:
                 "rank_bm25": None,
                 "rank_knn": None,
                 "rank_exact": None,
+                # M7 : les points de chaque recherche et de chaque bonus, gardés
+                # SÉPARÉMENT (le score total seul ne dit pas d'où il vient).
+                "score_details": {
+                    "keywords": 0.0, "profile": 0.0, "criteria": 0.0,
+                    "bonus_region": 0.0, "bonus_contract": 0.0,
+                },
             })
+            points = 1 / (RRF_K + rank)
             entry[method] = rank
-            entry["score"] += 1 / (RRF_K + rank)
+            entry["score"] += points
+            entry["score_details"][SCORE_PARTS[method]] = points  # M7
 
     # sorted(..., key=..., reverse=True) : du plus grand score au plus petit.
     return sorted(fused.values(), key=lambda entry: entry["score"], reverse=True)
@@ -347,14 +361,45 @@ def apply_bonuses(offers: list[dict], region: str | None, contract_types: list[s
         # Région de l'offre = région choisie (None si l'offre n'en a pas).
         if region and offer.get("region") == region:
             offer["score"] += BONUS_REGION
+            offer["score_details"]["bonus_region"] = BONUS_REGION  # M7
         # Au moins un contrat en commun : {"cdi","alternance"} & {"alternance"}
         # = {"alternance"}, non vide -> vrai. "inconnu" n'est jamais coché,
         # donc une offre "inconnu" ne reçoit pas ce bonus.
         if wanted_contracts & set(offer.get("contract_types", [])):
             offer["score"] += BONUS_CONTRACT
+            offer["score_details"]["bonus_contract"] = BONUS_CONTRACT  # M7
 
     ranking = sorted(offers, key=lambda offer: offer["score"], reverse=True)
     return ranking[:RESULT_SIZE]
+
+
+def add_match_percent(
+    offers: list[dict], searches_run: int, region: str | None, contract_types: list[str]
+) -> list[dict]:
+    """Ajoute à chaque offre son pourcentage de compatibilité (M7).
+
+    Le score RRF brut (ex. 0,0421) ne parle pas à l'utilisateur. On le
+    compare au MEILLEUR score possible POUR CETTE RECHERCHE :
+        1re place dans chaque recherche faite  -> searches_run x 1/61
+      + chaque bonus possible (seulement si le critère a été choisi)
+    puis match_percent = score / score_max x 100, arrondi.
+
+    Exemple : métier + région + alternance -> 3 recherches et 2 bonus :
+        max = 3 x 1/61 + 0,02 + 0,02 = 0,0892
+        offre à 0,0700 -> 78 %
+    100 % = 1re partout ET tous les critères respectés. Le pourcentage
+    ne change PAS l'ordre des offres : il le traduit seulement.
+    """
+    max_score = searches_run * (1 / (RRF_K + 1))
+    if region:
+        max_score += BONUS_REGION
+    if contract_types:
+        max_score += BONUS_CONTRACT
+
+    for offer in offers:
+        # min(100, ...) : sécurité, un pourcentage ne doit jamais dépasser 100.
+        offer["match_percent"] = min(100, round(offer["score"] / max_score * 100))
+    return offers
 
 
 # ---------------------------------------------------------------------------
@@ -369,7 +414,8 @@ def hybrid_search(
     contract_types: list[str] | None = None,
     salary_min: float | None = None,
 ) -> list[dict]:
-    """Recherche hybride complète : filtres, BM25, kNN (x1 ou x2), fusion RRF, bonus.
+    """Recherche hybride complète : filtres, BM25, kNN (x1 ou x2), fusion RRF, bonus,
+    puis pourcentage de compatibilité (M7).
 
     Utilisée par la route de test POST /api/search/preview, puis (étape 5)
     par le traitement du mode 1 "offres compatibles".
@@ -405,4 +451,8 @@ def hybrid_search(
 
     # 3) Fusion des classements, puis 4) bonus des critères respectés
     #    (M4, après tests) et coupe aux RESULT_SIZE meilleures.
-    return apply_bonuses(rrf_fuse(rankings), region, contract_types)
+    # 5) Pourcentage de compatibilité (M7). Nombre de recherches FAITES :
+    #    BM25 seulement si métier rempli, kNN toujours, 2 bis si critère strict.
+    searches_run = (1 if job_title else 0) + 1 + (1 if strict_filters is not None else 0)
+    offers = apply_bonuses(rrf_fuse(rankings), region, contract_types)
+    return add_match_percent(offers, searches_run, region, contract_types)
