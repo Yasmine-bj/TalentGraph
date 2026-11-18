@@ -2,7 +2,8 @@
 
 Copilote carrière : l'utilisateur colle son CV, choisit ses critères, et TalentGraph
 trouve les offres d'emploi réelles les plus proches de son profil, grâce à une
-**recherche hybride** (mots-clés BM25 + recherche par le sens avec des embeddings).
+**recherche hybride** (mots-clés BM25 + recherche par le sens avec des embeddings),
+et explique pour chaque offre **pourquoi** elle est proposée.
 
 Projet BigData / NoSQL (ENSIIE) — **PostgreSQL**, **Redis**, **Elasticsearch**,
 FastAPI, React, Docker.
@@ -30,12 +31,34 @@ Puis ouvrir **http://localhost:3000**.
 
 ## Utiliser l'application
 
-1. Cliquer sur **« Remplir avec un exemple »** (ou saisir son nom, son email et coller son CV).
-2. Choisir les critères (métier, région, contrats) et **« Lancer la recherche »**.
-3. La page affiche le **numéro de la demande** et son avancement en direct, puis les offres.
+1. Sur l'accueil, cliquer sur **« Commencer »**.
+2. **Étape 1 — Vous** : cliquer sur **« Remplir avec un exemple »**, ou saisir son nom,
+   son email et coller le texte de son CV (50 caractères minimum).
+3. **Étape 2 — Objectif** : « Trouver des offres ».
+4. **Étape 3 — Critères** (tous facultatifs) : métier, région, salaire minimum, contrats.
+5. **Étape 4 — Récapitulatif** : **« Lancer la recherche »**.
+6. La demande est enregistrée, la recherche tourne en arrière-plan, et la page suit son
+   avancement, puis affiche les offres :
+   - un **pourcentage de compatibilité** par offre ;
+   - les **raisons** (mots-clés, proximité avec le parcours, région, contrat) ;
+   - **« Pourquoi cette offre ? »** : sa place dans chaque recherche et les points gagnés ;
+   - le filtre **« Vos critères uniquement »**.
 
-Les modes « Compétences à travailler », « Améliorer mon CV » et « Lettre de motivation »
-(agents IA) sont en cours de développement.
+Le **numéro de la demande** est affiché à gauche des résultats (« Demande n° 42 »).
+
+Prochainement : comptes utilisateurs, import du CV en PDF/Word, et les modes
+« Compétences à développer », « Booster mon CV », « Lettre de motivation » (agents IA).
+
+## Comment sont classées les offres
+
+1. Jusqu'à **3 recherches** dans Elasticsearch : par **mots-clés** (BM25, sur le métier),
+   par **sens** (kNN sur les embeddings du CV), et par sens **parmi les offres qui
+   respectent exactement** la région et le contrat choisis.
+2. **Fusion RRF** : chaque offre gagne `1 / (60 + rang)` dans chaque recherche où elle apparaît.
+3. **Bonus** : +0,02 si la région est respectée, +0,02 si le contrat l'est.
+4. **Compatibilité** = score de l'offre ÷ meilleur score possible pour cette recherche.
+
+Détails : [`docs/api.md`](docs/api.md) et [`docs/decisions.md`](docs/decisions.md).
 
 ## Vérifier la persistance
 
@@ -52,6 +75,11 @@ SELECT id, mode, job_title, region, status, finished_at - created_at AS duree,
        jsonb_array_length(results->'offers') AS nb_offres
 FROM searches ORDER BY id DESC LIMIT 5;
 SELECT count(*) FROM offers;
+-- Les 3 premières offres de la dernière recherche, avec leur compatibilité
+SELECT o->>'title' AS offre, o->>'match_percent' AS compatibilite
+FROM searches, jsonb_array_elements(results->'offers') AS o
+WHERE id = (SELECT max(id) FROM searches)
+LIMIT 3;
 ```
 
 **Terminal 2 — Redis**
@@ -87,6 +115,15 @@ Les données sont dans des **volumes Docker** : elles survivent à un redémarra
 Documentation détaillée : [`docs/api.md`](docs/api.md) (routes, parcours d'une demande,
 recherche hybride), [`docs/decisions.md`](docs/decisions.md) (choix techniques),
 [`docs/learning-log.md`](docs/learning-log.md).
+
+## Développer
+
+```bash
+docker compose up -d                          # bases + API
+cd frontend && npm install && npm run dev     # http://localhost:5173 (rechargement à chaud)
+```
+Vite transmet les appels `/api` à `localhost:8000` (voir `frontend/vite.config.js`) ;
+en production, c'est nginx qui le fait (`frontend/nginx.conf`).
 
 ## Configuration (facultatif)
 
