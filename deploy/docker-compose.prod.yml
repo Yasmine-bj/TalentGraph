@@ -1,0 +1,139 @@
+# =============================================================================
+# deploy/docker-compose.prod.yml — TalentGraph EN PRODUCTION (serveur VPS, M8)
+#
+# DIFFÉRENCES AVEC LE docker-compose.yml DE DÉVELOPPEMENT :
+#   1. IMAGES TÉLÉCHARGÉES, pas construites : "image: ghcr.io/..." au lieu de
+#      "build: ...". GitHub Actions les construit et les publie ; le serveur
+#      fait seulement "docker compose pull". Il n'a pas besoin du code source.
+#   2. UN SEUL PORT PUBLIÉ : 80 (le site). PostgreSQL, Redis, Elasticsearch et
+#      l'API ne sont joignables QUE par les autres conteneurs, dans le réseau
+#      Docker. (Docker contourne le pare-feu ufw : un port publié ici serait
+#      ouvert sur Internet. On n'en publie donc aucun d'autre.)
+#   3. MOTS DE PASSE OBLIGATOIRES : ${X:?message} fait ÉCHOUER le démarrage si
+#      la variable manque dans le fichier .env (pas de valeur par défaut
+#      "talentgraph" comme en démo locale).
+#
+# SUR LE SERVEUR, ce fichier est copié sous le nom docker-compose.yml, à côté
+# d'un fichier .env (voir deploy/.env.prod.example), dans ~/talentgraph/.
+#   docker compose pull     # télécharger les dernières images
+#   docker compose up -d    # (re)démarrer ce qui a changé
+# =============================================================================
+
+name: talentgraph
+
+services:
+
+  # PostgreSQL : notre image (postgres:16 + scripts de création des tables).
+  postgres:
+    image: ghcr.io/yasmine-bj/talentgraph-postgres:latest
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER manquant dans .env}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD manquant dans .env}
+      POSTGRES_DB: ${POSTGRES_DB:?POSTGRES_DB manquant dans .env}
+    # PAS de "ports:" : base invisible depuis Internet.
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  # Redis : image officielle, journal AOF sur disque.
+  redis:
+    image: redis:7
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Elasticsearch : image officielle, un seul nœud.
+  # Sécurité (mot de passe) désactivée : acceptable SEULEMENT parce que le port
+  # 9200 n'est PAS publié (seuls l'API et le loader peuvent le joindre).
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.2.6
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"   # 1 Go de mémoire Java, sur les 8 Go du VPS
+    volumes:
+      - es_data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:9200/_cluster/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  # Loader : au premier démarrage, charge les offres de démo et construit
+  # l'index (embeddings compris), puis s'arrête. Ensuite : ne fait rien.
+  loader:
+    image: ghcr.io/yasmine-bj/talentgraph-loader:latest
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      ES_URL: http://elasticsearch:9200
+    volumes:
+      - hf_cache:/root/.cache/huggingface   # modèle d'embeddings, téléchargé une fois
+    depends_on:
+      postgres:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+    restart: "no"
+
+  # API FastAPI : joignable UNIQUEMENT par nginx (frontend), via le réseau Docker.
+  api:
+    image: ghcr.io/yasmine-bj/talentgraph-api:latest
+    environment:
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      REDIS_HOST: redis
+      ES_URL: http://elasticsearch:9200
+    volumes:
+      - hf_cache:/root/.cache/huggingface
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      elasticsearch:
+        condition: service_healthy
+      loader:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # Frontend : nginx sert l'interface et transmet /api/ au service api.
+  # LE SEUL PORT PUBLIÉ : 80 du serveur -> 80 du conteneur.
+  # Le site est donc accessible sur http://148.113.237.246 (port 80 par défaut).
+  frontend:
+    image: ghcr.io/yasmine-bj/talentgraph-frontend:latest
+    ports:
+      - "80:80"
+    depends_on:
+      api:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  pg_data:
+  redis_data:
+  es_data:
+  hf_cache:
