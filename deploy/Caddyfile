@@ -1,0 +1,68 @@
+# =============================================================================
+# deploy/Caddyfile — Configuration de Caddy (HTTPS automatique, M8)
+#
+# RÔLE DE CADDY : la PORTE D'ENTRÉE du site, devant le frontend (nginx).
+#   - il obtient TOUT SEUL un certificat gratuit Let's Encrypt pour chaque nom
+#     écrit ci-dessous, et le renouvelle automatiquement (validité : 90 jours) ;
+#   - il chiffre les connexions des visiteurs (HTTPS, port 443) ;
+#   - il redirige automatiquement http:// vers https:// ;
+#   - il transmet ensuite les requêtes au conteneur frontend, DANS le réseau
+#     Docker (non chiffré, mais privé : ce trajet ne quitte jamais le serveur).
+#     On appelle ça la "terminaison TLS" : le chiffrement s'arrête chez Caddy.
+#
+# LE CHEMIN D'UNE VISITE :
+#   1. http://talent-graph.cloud (port 80)
+#        -> Caddy répond "308 : va plutôt sur https://talent-graph.cloud"
+#   2. https://talent-graph.cloud (port 443, CHIFFRÉ)
+#        -> Caddy déchiffre
+#        -> transmet à frontend:80 (nginx, réseau Docker privé)
+#             /         -> les fichiers du site
+#             /api/...  -> api:8000 -> PostgreSQL / Redis / Elasticsearch
+#        -> Caddy rechiffre la réponse et la renvoie au navigateur
+#
+# ATTENTION, DEUX "PORT 80" DIFFÉRENTS :
+#   - le port 80 PUBLIC du serveur : c'est Caddy qui l'écoute (redirection vers
+#     https + vérification de Let's Encrypt) ;
+#   - le port 80 du CONTENEUR frontend (frontend:80) : interne au réseau
+#     Docker, joignable uniquement par Caddy.
+#
+# SYNTAXE : le fichier contient des BLOCS. Chaque bloc commence par une
+# ADRESSE (le nom du site), puis, entre { }, ce que Caddy doit faire pour les
+# visiteurs de cette adresse.
+#
+# {$DOMAIN} : remplacé par la valeur de la variable d'environnement DOMAIN,
+# définie dans le fichier .env du serveur (DOMAIN=talent-graph.cloud) et
+# transmise au conteneur caddy par docker-compose.prod.yml.
+# =============================================================================
+
+
+# -----------------------------------------------------------------------------
+# BLOC 1 : le site, https://talent-graph.cloud
+# -----------------------------------------------------------------------------
+# - {$DOMAIN} est remplacé par la valeur de la variable DOMAIN, donc
+#   talent-graph.cloud ;
+# - "pour les visiteurs de talent-graph.cloud, transmets tout (reverse_proxy)
+#   au conteneur frontend, sur son port 80" ;
+# - et PARCE QU'IL Y A UN NOM DE DOMAINE en tête du bloc, Caddy fait
+#   automatiquement le certificat, le HTTPS sur le port 443 et la redirection
+#   http -> https. Pas besoin de l'écrire : c'est le comportement par défaut
+#   de Caddy.
+{$DOMAIN} {
+	reverse_proxy frontend:80
+}
+
+
+# -----------------------------------------------------------------------------
+# BLOC 2 : www.talent-graph.cloud -> redirection vers l'adresse sans www
+# -----------------------------------------------------------------------------
+# - Caddy obtient aussi un certificat pour www.talent-graph.cloud (sinon le
+#   navigateur afficherait une alerte de sécurité avant même la redirection) ;
+# - redir : renvoie le visiteur vers https://talent-graph.cloud ;
+# - {uri} : garde la suite de l'adresse
+#   (www.talent-graph.cloud/recherche -> talent-graph.cloud/recherche) ;
+# - permanent : code 308, "l'adresse officielle est celle sans www" ; les
+#   navigateurs et les moteurs de recherche le retiennent. Ainsi, le site n'a
+#   qu'UNE seule adresse.
+www.{$DOMAIN} {
+	redir https://{$DOMAIN}{uri} permanent
+}

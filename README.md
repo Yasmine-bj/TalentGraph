@@ -8,6 +8,8 @@ et explique pour chaque offre **pourquoi** elle est proposée.
 Projet BigData / NoSQL (ENSIIE) — **PostgreSQL**, **Redis**, **Elasticsearch**,
 FastAPI, React, Docker.
 
+**Démo en ligne : https://talent-graph.cloud** — déploiement décrit dans [`docs/deploy.md`](docs/deploy.md).
+
 ## Lancer le projet
 
 Prérequis : **Docker Desktop** (moteur démarré). Aucune configuration nécessaire.
@@ -114,7 +116,8 @@ Les données sont dans des **volumes Docker** : elles survivent à un redémarra
 
 Documentation détaillée : [`docs/api.md`](docs/api.md) (routes, parcours d'une demande,
 recherche hybride), [`docs/decisions.md`](docs/decisions.md) (choix techniques),
-[`docs/learning-log.md`](docs/learning-log.md).
+[`docs/learning-log.md`](docs/learning-log.md),
+[`docs/deploy.md`](docs/deploy.md) (serveur, HTTPS, mises à jour).
 
 ## Développer
 
