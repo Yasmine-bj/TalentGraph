@@ -5,16 +5,17 @@
 #   1. IMAGES TÉLÉCHARGÉES, pas construites : "image: ghcr.io/..." au lieu de
 #      "build: ...". GitHub Actions les construit et les publie ; le serveur
 #      fait seulement "docker compose pull". Il n'a pas besoin du code source.
-#   2. UN SEUL PORT PUBLIÉ : 80 (le site). PostgreSQL, Redis, Elasticsearch et
-#      l'API ne sont joignables QUE par les autres conteneurs, dans le réseau
-#      Docker. (Docker contourne le pare-feu ufw : un port publié ici serait
+#   2. SEULS LES PORTS 80 ET 443 SONT PUBLIÉS, par Caddy (HTTPS, étape 8 ter).
+#      Le frontend, PostgreSQL, Redis, Elasticsearch et l'API ne sont
+#      joignables QUE par les autres conteneurs, dans le réseau Docker. (Docker contourne le pare-feu ufw : un port publié ici serait
 #      ouvert sur Internet. On n'en publie donc aucun d'autre.)
 #   3. MOTS DE PASSE OBLIGATOIRES : ${X:?message} fait ÉCHOUER le démarrage si
 #      la variable manque dans le fichier .env (pas de valeur par défaut
 #      "talentgraph" comme en démo locale).
 #
 # SUR LE SERVEUR, ce fichier est copié sous le nom docker-compose.yml, à côté
-# d'un fichier .env (voir deploy/.env.prod.example), dans ~/talentgraph/.
+# d'un fichier .env (voir deploy/.env.prod.example) et du Caddyfile, dans
+# ~/talentgraph/.
 #   docker compose pull     # télécharger les dernières images
 #   docker compose up -d    # (re)démarrer ce qui a changé
 # =============================================================================
@@ -121,15 +122,38 @@ services:
     restart: unless-stopped
 
   # Frontend : nginx sert l'interface et transmet /api/ au service api.
-  # LE SEUL PORT PUBLIÉ : 80 du serveur -> 80 du conteneur.
-  # Le site est donc accessible sur http://148.113.237.246 (port 80 par défaut).
+  # Plus de "ports:" (étape 8 ter) : c'est Caddy qui reçoit les visiteurs et
+  # lui transmet les requêtes, sur frontend:80, dans le réseau Docker.
   frontend:
     image: ghcr.io/yasmine-bj/talentgraph-frontend:latest
-    ports:
-      - "80:80"
     depends_on:
       api:
         condition: service_healthy
+    restart: unless-stopped
+
+  # Caddy : LA PORTE D'ENTRÉE HTTPS (étape 8 ter), le SEUL service publié.
+  #   - obtient et renouvelle tout seul le certificat Let's Encrypt ;
+  #   - redirige http:// vers https:// ;
+  #   - transmet les requêtes au frontend (voir deploy/Caddyfile).
+  # Le site est accessible sur https://talent-graph.cloud
+  caddy:
+    image: caddy:2
+    environment:
+      # Le nom de domaine, utilisé par le Caddyfile ({$DOMAIN}).
+      DOMAIN: ${DOMAIN:?DOMAIN manquant dans .env}
+    ports:
+      - "80:80"       # HTTP : redirection vers https + vérification Let's Encrypt
+      - "443:443"     # HTTPS : le site, chiffré
+    volumes:
+      # La configuration, copiée sur le serveur à côté de ce fichier.
+      # :ro (read-only) : Caddy peut la lire, pas la modifier.
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Les CERTIFICATS : à garder ! Sans ce volume, Caddy en redemanderait à
+      # chaque redémarrage, et Let's Encrypt limite le nombre de demandes.
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
     restart: unless-stopped
 
 volumes:
@@ -137,3 +161,5 @@ volumes:
   redis_data:
   es_data:
   hf_cache:
+  caddy_data:     # certificats HTTPS (étape 8 ter)
+  caddy_config:   # configuration interne de Caddy
