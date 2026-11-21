@@ -228,3 +228,39 @@ Chaque décision technique importante : ce qui a été choisi, pourquoi, et les 
 - Limite acceptée : la tâche vit en mémoire dans le conteneur `api` ; un redémarrage pendant le traitement la perd (demande bloquée en `running`).
 - Alternative pour la production : une file de tâches (liste Redis + conteneur `worker`) ; le worker ne recevrait que l'identifiant et relirait PostgreSQL.
 - Polling plutôt que WebSocket / Server-Sent Events : plus simple, suffisant ici.
+
+## D26 — Déploiement par images publiées sur ghcr.io (M8)
+- Décision : GitHub Actions construit les images (`api`, `loader`, `frontend`, `postgres`) à chaque push sur `main` et les publie sur ghcr.io ; le serveur fait seulement `docker compose pull` puis `up -d`.
+- Pourquoi : le serveur ne compile rien (PyTorch, npm…) et n'a pas besoin du code source ; l'image qui tourne en production est exactement celle construite par la CI ; mise à jour en deux commandes.
+- Étiquettes `latest` (ce que le serveur télécharge) et `sha-<commit>` (savoir quel code tourne, revenir en arrière).
+- Packages rendus publics (dépôt public) : pas de jeton à stocker sur le serveur.
+- Alternative écartée : `git clone` + `docker compose up --build` sur le serveur (lent, consomme la mémoire du VPS, dépend de l'état du dépôt sur le serveur).
+
+## D27 — Image PostgreSQL avec les scripts d'initialisation intégrés (M8)
+- Décision : `infra/postgres/Dockerfile` = `postgres:16` + `COPY init/ /docker-entrypoint-initdb.d/` ; le compose de développement l'utilise aussi (`build: ./infra/postgres`).
+- Pourquoi : le serveur n'a pas le dossier `infra/` à monter ; la même image crée les tables sur le PC, chez le correcteur et en production.
+- Les scripts ne s'exécutent que sur un volume vide : les bases existantes ne sont pas touchées.
+
+## D28 — Compose de production séparé, un seul point d'entrée public (M8)
+- Décision : `deploy/docker-compose.prod.yml` (images ghcr.io, aucun port de base publié) + `deploy/.env.prod.example` ; seul Caddy publie des ports (80 et 443).
+- Pourquoi : Docker contourne le pare-feu `ufw` ; ne pas publier les ports est la vraie protection des bases (Redis et Elasticsearch n'ont pas de mot de passe dans notre configuration).
+- Variables obligatoires `${X:?message}` : le démarrage échoue si le `.env` manque, au lieu d'utiliser le mot de passe de démo `talentgraph`.
+- Mot de passe PostgreSQL généré sur le serveur (`openssl rand -hex 32`), jamais affiché ni commité. Il n'est lu qu'à la création du volume : le changer ensuite demande un `ALTER USER`.
+
+## D29 — HTTPS avec Caddy et le domaine `talent-graph.cloud` (M8)
+- Décision : Caddy devant le frontend : certificats Let's Encrypt obtenus et renouvelés automatiquement, redirection `http` → `https`, `www` redirigé vers l'adresse sans `www` (`deploy/Caddyfile`).
+- Pourquoi : chiffrer les données saisies (CV, email) ; Caddy fait le HTTPS sans configuration ni tâche de renouvellement (contrairement à nginx + certbot).
+- Terminaison TLS chez Caddy : le trajet Caddy → frontend reste en HTTP, dans le réseau Docker privé.
+- Volume `caddy_data` obligatoire : sans lui, Caddy redemanderait un certificat à chaque redémarrage (Let's Encrypt limite les demandes).
+- Domaine `.cloud` acheté chez OVH (2,39 € TTC la 1re année) ; passer le renouvellement en manuel (23,15 € TTC/an ensuite). L'accès par l'IP seule ne sert plus le site (pas de certificat possible pour une IP chez Let's Encrypt).
+
+## D30 — Serveur : VPS OVH, Docker d'Ubuntu, pare-feu `ufw` (M8)
+- Décision : VPS-2 OVH (4 vCore, 8 Go, 75 Go, Canada faute de stock en Europe), Ubuntu 26.04 ; paquets `docker.io` + `docker-compose-v2` d'Ubuntu ; `ufw` n'ouvre que 22, 80 et 443 ; connexion SSH par clé.
+- Pourquoi : 8 Go suffisent pour Elasticsearch (1 Go de heap), l'API et son modèle, et le loader au premier démarrage ; les paquets d'Ubuntu s'installent en une commande et sont maintenus par la distribution.
+- `vm.max_map_count=262144` réglé de façon permanente (`/etc/sysctl.d/`) pour Elasticsearch.
+- À faire : désactiver l'authentification SSH par mot de passe.
+
+## D31 — Données de démonstration en production, en attendant M9 (M8)
+- Décision : le premier déploiement charge les 1 794 offres de `seed/demo_offers.json` (le loader de la livraison).
+- Pourquoi : le domaine et le HTTPS avaient besoin d'un site qui tourne ; le chargement complet et quotidien des offres relève d'une branche à part (`feature/m9-daily-refresh`).
+- Limite : l'écran d'attente annonce « 20 000+ offres » alors que le serveur en a 1 794, jusqu'au M9.

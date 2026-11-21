@@ -1,0 +1,100 @@
+# =============================================================================
+# .github/workflows/docker-images.yml — Construire et publier les images (M8)
+#
+# À CHAQUE PUSH SUR main (la version validée), GitHub Actions :
+#   1. récupère le code ;
+#   2. construit les 4 images de TalentGraph (api, loader, frontend, postgres) ;
+#   3. les publie sur ghcr.io (GitHub Container Registry).
+# Le serveur n'a ensuite plus qu'à les TÉLÉCHARGER (docker compose pull) :
+# il ne construit rien et n'a pas besoin du code source.
+#
+# Redis et Elasticsearch ne sont pas construits ici : on utilise leurs images
+# officielles telles quelles.
+# =============================================================================
+
+name: Build and push Docker images
+
+# QUAND lancer le workflow ?
+on:
+  push:
+    branches:
+      - main
+  # Ajoute un bouton "Run workflow" dans l'onglet Actions (lancement manuel).
+  workflow_dispatch:
+
+# Droits du jeton automatique GITHUB_TOKEN :
+#   contents: read   -> lire le code du dépôt
+#   packages: write  -> publier des images sur ghcr.io
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    # La machine prêtée par GitHub (un Ubuntu neuf à chaque exécution).
+    runs-on: ubuntu-latest
+
+    # MATRIX : le même job, lancé une fois PAR IMAGE, en parallèle.
+    # Pour chaque image : son nom, son contexte de build et son Dockerfile
+    # (les mêmes que dans docker-compose.yml).
+    strategy:
+      fail-fast: false   # si une image échoue, les autres continuent quand même
+      matrix:
+        include:
+          - name: api
+            context: ./api
+            dockerfile: ./api/Dockerfile
+          - name: loader
+            context: .                  # la racine (voir .dockerignore en liste blanche)
+            dockerfile: ./worker/Dockerfile
+          - name: frontend
+            context: ./frontend
+            dockerfile: ./frontend/Dockerfile
+          - name: postgres
+            context: ./infra/postgres
+            dockerfile: ./infra/postgres/Dockerfile
+
+    steps:
+      # 1) Récupérer le code du dépôt sur la machine de GitHub.
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # 2) Buildx : le constructeur d'images moderne de Docker (cache, etc.).
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 3) Se connecter à ghcr.io avec le jeton AUTOMATIQUE de GitHub
+      #    (aucun mot de passe à créer ni à stocker).
+      - name: Log in to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 4) Calculer le nom complet et les étiquettes de l'image :
+      #      ghcr.io/yasmine-bj/talentgraph-api:latest
+      #      ghcr.io/yasmine-bj/talentgraph-api:sha-33a8eec
+      #    Le nom est écrit EN MINUSCULES (obligatoire dans un registre).
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/yasmine-bj/talentgraph-${{ matrix.name }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+
+      # 5) Construire l'image et la publier (push: true).
+      #    Cache "gha" : les couches inchangées (ex. l'installation de PyTorch)
+      #    sont réutilisées d'une exécution à l'autre -> builds bien plus rapides.
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
