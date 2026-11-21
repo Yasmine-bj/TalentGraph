@@ -1,7 +1,7 @@
 # =============================================================================
 # .github/workflows/docker-images.yml — Construire et publier les images (M8)
 #
-# À CHAQUE PUSH (sur main, ou sur la branche de déploiement), GitHub Actions :
+# À CHAQUE PUSH SUR main (la version validée), GitHub Actions :
 #   1. récupère le code ;
 #   2. construit les 4 images de TalentGraph (api, loader, frontend, postgres) ;
 #   3. les publie sur ghcr.io (GitHub Container Registry).
@@ -19,9 +19,6 @@ on:
   push:
     branches:
       - main
-      # TEMPORAIRE (M8) : pour déployer et tester AVANT de merger.
-      # À retirer à la fin de la branche (étape 10).
-      - feature/m8-deploy
   # Ajoute un bouton "Run workflow" dans l'onglet Actions (lancement manuel).
   workflow_dispatch:
 
